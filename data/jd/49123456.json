@@ -1,0 +1,18 @@
+{
+  "job_id": "49123456",
+  "source_url": "https://www.jobkorea.co.kr/Recruit/GI_Read/49123456",
+  "iframe_url": "https://www.jobkorea.co.kr/Recruit/GI_Read_Comt_Ifrm?Gno=49123456&isHiringCenter=false&hideMapView=true",
+  "metadata": {
+    "headcount": null,
+    "english_resume_required": false
+  },
+  "error": null,
+  "data": {
+    "tasks": [],
+    "skills": [],
+    "requirements": [],
+    "preferred": [],
+    "process": [],
+    "notes": []
+  }
+}

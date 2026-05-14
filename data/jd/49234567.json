@@ -1,0 +1,22 @@
+{
+  "job_id": "49234567",
+  "source_url": "https://www.jobkorea.co.kr/Recruit/GI_Read/49234567",
+  "iframe_url": "https://www.jobkorea.co.kr/Recruit/GI_Read_Comt_Ifrm?Gno=49234567&isHiringCenter=false&hideMapView=true",
+  "metadata": {
+    "headcount": null,
+    "english_resume_required": false
+  },
+  "error": {
+    "type": "http_error",
+    "status_code": 500,
+    "message": "Server error '500 Internal Server Error' for url 'https://www.jobkorea.co.kr/Recruit/GI_Read_Comt_Ifrm?Gno=49234567&isHiringCenter=false&hideMapView=true'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500"
+  },
+  "data": {
+    "tasks": [],
+    "skills": [],
+    "requirements": [],
+    "preferred": [],
+    "process": [],
+    "notes": []
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "meta": {
+    "company": "한국평가데이터",
+    "job": "기업 신용 위험관리 컨설팅",
+    "created_at": "2026-05-11 17:24:56"
+  },
+  "data": {
+    "summary": "데이터 솔루션 분야에서 기업 신용 위험관리 관련 컨설팅 업무를 수행할 인재를 모집합니다.",
+    "responsibilities": [
+      "기업 여신 ML/AI 모형 개발 및 프로세스개선 컨설팅",
+      "기업여신 신용위험 및 재무분석시스템 컨설팅",
+      "Data Scientist로서 컨설팅 프로젝트 업무 수행 시 고객사 상주 근무 가능"
+    ],
+    "requirements": {
+      "essential": {
+        "education": {
+          "degree": "4년제 대학 학사학위 이상",
+          "major": []
+        },
+        "experience": {
+          "min_years": 3,
+          "domain": []
+        },
+        "certifications": [],
+        "tools": [],
+        "soft_skills": []
+      },
+      "preferred": {
+        "education": {
+          "degree": "",
+          "major": []
+        },
+        "experience": {
+          "min_years": 0,
+          "domain": [
+            "금융기관",
+            "대기업",
+            "신용정보업종",
+            "업무 관련 공공기관"
+          ]
+        },
+        "certifications": [
+          "지원분야 및 업무 관련 자격증"
+        ],
+        "tools": [
+          "SAS",
+          "Python",
+          "R"
+        ],
+        "soft_skills": []
+      }
+    },
+    "keywords": [
+      "데이터 분석",
+      "ML",
+      "AI",
+      "신용 위험관리",
+      "컨설팅"
+    ],
+    "insight": "서울, 수도권 및 지방에서 근무 가능하며, 다양한 경력과 기술을 가진 인재를 선호합니다."
+  }
+}

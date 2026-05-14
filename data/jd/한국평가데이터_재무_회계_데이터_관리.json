@@ -1,0 +1,66 @@
+{
+  "meta": {
+    "company": "한국평가데이터",
+    "job": "재무/회계 데이터 관리",
+    "created_at": "2026-05-11 17:23:05"
+  },
+  "data": {
+    "summary": "데이터 솔루션 부문에서 재무/회계 데이터 관리 업무를 수행할 인재를 모집합니다.",
+    "responsibilities": [
+      "당사 DB에서 관리되는 재무표 관련 업무",
+      "사업/감사보고서 재무 입력관리, 외부 데이터의 재무계정 매핑 작업",
+      "기업정보 최신화센터 재무표 수기 입력에 대한 감리 및 계약 관리",
+      "재무/회계 관련 데이터 상품 구축 및 기존 데이터상품 운영"
+    ],
+    "requirements": {
+      "essential": {
+        "education": {
+          "degree": "4년제 대학 학사학위 이상",
+          "major": []
+        },
+        "experience": {
+          "min_years": 3,
+          "domain": [
+            "회계 관련 업무"
+          ]
+        },
+        "certifications": [
+          "한국공인회계사 자격"
+        ],
+        "tools": [],
+        "soft_skills": []
+      },
+      "preferred": {
+        "education": {
+          "degree": "",
+          "major": []
+        },
+        "experience": {
+          "min_years": 0,
+          "domain": [
+            "경영관리",
+            "세경 관련 업무",
+            "금융권 기획/관리 업무"
+          ]
+        },
+        "certifications": [],
+        "tools": [
+          "SAS",
+          "Python",
+          "R"
+        ],
+        "soft_skills": []
+      }
+    },
+    "keywords": [
+      "재무",
+      "회계",
+      "데이터 관리",
+      "DB",
+      "금융기관",
+      "대기업",
+      "신용정보업종"
+    ],
+    "insight": "회계 관련 자격증과 경력이 중요하며, 데이터 분석 능력이 우대되는 포지션입니다."
+  }
+}
