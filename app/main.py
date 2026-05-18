@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.api import company, jd, resume, interview
+from app.api import company, jd, resume, interview, analysis, chat
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -12,6 +12,8 @@ app.add_middleware(
 )
 
 app.include_router(company.router)
+app.include_router(chat.router)
+app.include_router(analysis.router)
 # app.include_router(jd.router)
 # app.include_router(resume.router)
 # app.include_router(interview.router)
