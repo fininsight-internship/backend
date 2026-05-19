@@ -23,6 +23,7 @@ def get_next_step(
     star_data: dict,
     history: list,
     company_insights: str = "",
+    char_limit: int = 0,
 ) -> dict:
     user_answer_count = sum(1 for h in history if h.get("role") == "user")
     step = user_answer_count + 1
@@ -33,9 +34,11 @@ def get_next_step(
         for h in history
     ]) or "없음"
 
+    char_limit_text = f"\n글자 수 제한: {char_limit}자 이내" if char_limit > 0 else ""
+
     prompt = f"""기업: {company_name}
 직무: {job_title}
-자소서 문항: {cover_question}
+자소서 문항: {cover_question}{char_limit_text}
 
 STAR 경험:
 S: {star_data.get('S', '')}
@@ -89,6 +92,7 @@ def generate_final_letter(
     star_data: dict,
     selections: list,
     company_insights: str = "",
+    char_limit: int = 0,
 ) -> str:
     sel_text = "\n".join([f"- {s}" for s in selections])
     prompt = f"""아래 정보를 바탕으로 자기소개서를 작성해주세요.
@@ -110,8 +114,9 @@ STAR 경험:
 작성 규칙:
 - 마크다운 기호 없이 순수 텍스트
 - '귀사' 대신 실제 회사명({company_name}) 사용
-- 문어체 유지, 700자 내외
-- 도입 - 경험 - 역량 - 포부 흐름으로 자연스럽게 작성"""
+- 문어체 유지
+- 도입 - 경험 - 역량 - 포부 흐름으로 자연스럽게 작성
+{f"- 반드시 {char_limit}자 이내로 작성 (글자 수 제한 엄수)" if char_limit > 0 else "- 700자 내외로 작성"}"""
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
