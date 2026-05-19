@@ -50,12 +50,12 @@ def generate_star_summary(experience_name: str, experience_role: str, answers: d
     return {"status": "success", "summary": summary}
 
 
-def cover_chat_next(company_name: str, job_title: str, cover_question: str, star_data: dict, history: list, company_insights: str = "") -> dict:
-    return _cover_next(company_name, job_title, cover_question, star_data, history, company_insights)
+def cover_chat_next(company_name: str, job_title: str, cover_question: str, star_data: dict, history: list, company_insights: str = "", char_limit: int = 0) -> dict:
+    return _cover_next(company_name, job_title, cover_question, star_data, history, company_insights, char_limit)
 
 
-def cover_chat_finalize(company_name: str, job_title: str, cover_question: str, star_data: dict, selections: list, company_insights: str = "") -> dict:
-    letter = _cover_finalize(company_name, job_title, cover_question, star_data, selections, company_insights)
+def cover_chat_finalize(company_name: str, job_title: str, cover_question: str, star_data: dict, selections: list, company_insights: str = "", char_limit: int = 0) -> dict:
+    letter = _cover_finalize(company_name, job_title, cover_question, star_data, selections, company_insights, char_limit)
     return {"status": "success", "final_letter": letter}
 
 

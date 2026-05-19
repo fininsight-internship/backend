@@ -92,6 +92,7 @@ class CoverChatRequest(BaseModel):
     company_name: str
     job_title: str
     cover_question: str
+    char_limit: Optional[int] = 0
     star_data: dict
     history: List[dict]
     company_insights: Optional[str] = ""
@@ -101,6 +102,7 @@ class CoverFinalizeRequest(BaseModel):
     company_name: str
     job_title: str
     cover_question: str
+    char_limit: Optional[int] = 0
     star_data: dict
     selections: List[str]
     company_insights: Optional[str] = ""
@@ -111,7 +113,8 @@ async def cover_chat(req: CoverChatRequest):
     try:
         return resume_service.cover_chat_next(
             req.company_name, req.job_title, req.cover_question,
-            req.star_data, req.history, req.company_insights or ""
+            req.star_data, req.history, req.company_insights or "",
+            req.char_limit or 0
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -122,7 +125,8 @@ async def cover_finalize(req: CoverFinalizeRequest):
     try:
         return resume_service.cover_chat_finalize(
             req.company_name, req.job_title, req.cover_question,
-            req.star_data, req.selections, req.company_insights or ""
+            req.star_data, req.selections, req.company_insights or "",
+            req.char_limit or 0
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
