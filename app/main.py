@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.api import company, jd, resume, interview, analysis, chat
+from app.api import company, jd, resume, interview, analysis, chat, auth
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -11,6 +11,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(company.router)
 app.include_router(chat.router)
 app.include_router(analysis.router)
