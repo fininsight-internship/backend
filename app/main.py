@@ -14,4 +14,4 @@ app.add_middleware(
 app.include_router(company.router)
 # app.include_router(jd.router)
 # app.include_router(resume.router)
-# app.include_router(interview.router)
+app.include_router(interview.router)
