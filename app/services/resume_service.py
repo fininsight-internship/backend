@@ -59,6 +59,54 @@ def cover_chat_finalize(company_name: str, job_title: str, cover_question: str, 
     return {"status": "success", "final_letter": letter}
 
 
+def evaluate_all_drafts(company_name: str, job_title: str, questions: list, drafts: list) -> dict:
+    """전체 자소서 통합 검토 — 반복 경험/표현 체크 + 전체 완성도 피드백"""
+    from google import genai
+    from google.genai import types
+    import os
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+    pairs = []
+    for i, (q, d) in enumerate(zip(questions, drafts)):
+        if d and d.strip():
+            pairs.append(f"[문항 {i + 1}] {q}\n[작성 내용]\n{d.strip()}")
+
+    if not pairs:
+        return {"status": "error", "feedback": "작성된 내용이 없습니다. 최소 한 문항 이상 작성 후 다시 시도하세요."}
+
+    combined = "\n\n" + "─" * 40 + "\n\n".join(pairs)
+
+    prompt = f"""당신은 자기소개서 전문 컨설턴트입니다.
+아래는 {company_name} {job_title} 지원을 위해 작성된 자기소개서 전체 문항입니다.
+
+{combined}
+
+다음 세 가지 관점에서 통합 피드백을 제공하세요.
+
+### 🔄 반복 경험 분석
+여러 문항에서 동일한 경험(프로젝트명, 사건, 역할 등)이 반복 사용되었는지 확인하고,
+반복된 경우 어떤 문항에서 어떻게 겹쳤는지 구체적으로 지적하세요.
+문제가 없으면 "반복 경험 없음" 으로 작성하세요.
+
+### 📝 반복 표현 분석
+"열심히", "최선을 다해", "성장했습니다" 같이 여러 문항에서 동일하거나 유사한 표현이
+반복 사용된 경우를 모두 찾아서 지적하고, 대안 표현을 제시하세요.
+문제가 없으면 "반복 표현 없음" 으로 작성하세요.
+
+### 💡 전체 완성도 평가
+전체 자기소개서를 보았을 때 지원자의 강점이 일관성 있게 드러나는지,
+각 문항이 서로 보완적인 내용을 담고 있는지 종합 평가하고
+가장 우선적으로 개선해야 할 1~2가지 사항을 제시하세요.
+"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-pro",
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.3),
+    )
+    return {"status": "success", "feedback": response.text}
+
+
 def evaluate_detailed(draft: str, company_name: str, job_title: str, cover_question: str,
                       selections: list = None, company_insights: str = "") -> dict:
     context = {

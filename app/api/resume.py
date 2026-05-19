@@ -143,6 +143,23 @@ class EvaluateDetailedRequest(BaseModel):
     company_insights: Optional[str] = ""
 
 
+class EvaluateAllRequest(BaseModel):
+    company_name: str
+    job_title: str
+    questions: List[str]
+    drafts: List[str]
+
+
+@router.post("/evaluate-all")
+async def evaluate_all(req: EvaluateAllRequest):
+    try:
+        return resume_service.evaluate_all_drafts(
+            req.company_name, req.job_title, req.questions, req.drafts
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/evaluate-detailed")
 async def evaluate_detailed(req: EvaluateDetailedRequest):
     try:
