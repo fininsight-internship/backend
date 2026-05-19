@@ -12,7 +12,7 @@ from openai import OpenAI
 import anthropic
 from google import genai as google_genai
 
-from app.services.rag_data import (
+from app.services.interview_rag_data import (
     FEATURE_TAXONOMY,
     AVAILABLE_POSITIONS,
     compute_feature_weights,
