@@ -1,41 +1,158 @@
-## 기업 분석 ##
-
 import os
 import json
 import re
 from dotenv import load_dotenv
 from openai import OpenAI
+
 from app.crawler.news_crawler import crawl_news
+from app.crawler.company_crawler import crawl_company_culture
+from app.crawler.career_crawler import get_company_career_url
 
 load_dotenv()
-
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
+# 🔹 뉴스 요약
+def summarize_news(contents: list):
+    summaries = []
+
+    for c in contents:
+        prompt = f"""
+다음 뉴스 한 개를 한 줄로 요약해라.
+핵심 사건만 포함.
+
+뉴스:
+{c}
+"""
+        res = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=100
+        )
+        summaries.append(res.choices[0].message.content.strip())
+
+    combined = "\n".join(summaries)
+
+    final_prompt = f"""
+다음 뉴스 요약들을 기반으로 기업의 주요 흐름을 정리해라.
+
+조건:
+- 반드시 해당 기업 기준으로 작성
+- 다른 기업 언급 금지
+- 특정 기능이 아닌 기업 전체 관점에서 작성
+- 핵심 사업 중심으로 재해석
+
+요약:
+{combined}
+"""
+
+    final = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": final_prompt}],
+        temperature=0.2,
+        max_tokens=200
+    )
+
+    return final.choices[0].message.content.strip()
+
+
+# 🔹 JSON 파싱 안정화
+def safe_json_parse(content: str):
+    try:
+        return json.loads(content)
+    except:
+        match = re.search(r"\{[\s\S]*\}", content)
+        if match:
+            try:
+                return json.loads(match.group())
+            except:
+                return {}
+    return {}
+
+
+# 🔹 strategy 타입 보정
+def normalize_strategy(parsed: dict):
+    fixed = []
+    for s in parsed.get("strategy", []):
+        if isinstance(s, dict):
+            area = s.get("area", "")
+            direction = s.get("direction", "")
+            fixed.append(f"{area}: {direction}".strip(": "))
+        else:
+            fixed.append(str(s))
+    parsed["strategy"] = fixed
+    return parsed
+
+
+# 🔹 business 카테고리 매핑 (핵심)
+def normalize_business(llm_result: list):
+    result = []
+
+    for item in llm_result:
+        text = str(item)
+
+        if "검색" in text:
+            result.append("검색")
+        if "광고" in text:
+            result.append("광고")
+        if "커머스" in text or "쇼핑" in text or "패션" in text:
+            result.append("커머스")
+        if "AI" in text or "인공지능" in text:
+            result.append("AI")
+        if "콘텐츠" in text or "영상" in text:
+            result.append("콘텐츠")
+        if "클라우드" in text:
+            result.append("클라우드")
+        if "금융" in text:
+            result.append("금융")
+
+    result = list(set(result))
+
+    # fallback (마지막에만)
+    if len(result) == 0:
+        result = ["플랫폼"]
+
+    return result
+
+
+# 🔹 기본 필드 보정
+def ensure_fields(parsed: dict):
+    parsed.setdefault("summary", "")
+    parsed.setdefault("issues", [])
+    parsed.setdefault("business", {"main": [], "description": ""})
+    parsed.setdefault("strategy", [])
+    parsed.setdefault("job_insight", None)
+    return parsed
+
+
+# 🔹 기업 분석
 def generate_company_report(company: str, job: str = None):
+
     # 1. 뉴스 수집
-    news = crawl_news(company)
+    news_contents = crawl_news(company)
+    if not news_contents:
+        news_contents = ["뉴스 없음"]
 
-    if not news:
-        news = ["관련 뉴스 없음"]
+    # 2. 요약
+    summarized_news = summarize_news(news_contents)
 
-    context = "\n".join(news)
-
-    # 2. 프롬프트
+    # 3. LLM 분석
     prompt = f"""
 기업: {company}
 
-뉴스:
-{context}
+요약:
+{summarized_news}
 
-뉴스가 부족해도 반드시 내용을 채워라.
-빈 값으로 두지 말고 일반적인 기업 분석을 작성해라.
+조건:
+- 반드시 JSON만 출력
+- 반드시 {company} 기준으로 작성
+- 다른 기업 언급 금지
+- issues 2~3개 필수 생성
+- strategy 2~3개 필수 생성
+- 특정 기능이 아니라 기업 전체 관점에서 작성
 
-절대 JSON 외 텍스트 출력 금지
-설명 금지
-코드블록 금지
-
-반드시 아래 JSON 형식으로만 출력해라.
+출력:
 
 {{
   "summary": "",
@@ -44,55 +161,58 @@ def generate_company_report(company: str, job: str = None):
     "main": [],
     "description": ""
   }},
-  "culture": {{
-    "keywords": [],
-    "description": ""
-  }},
   "job_insight": null,
   "strategy": []
 }}
 """
 
-    # 3. LLM 호출
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
+        temperature=0.2,
         max_tokens=600
     )
 
-    content = response.choices[0].message.content
+    raw = response.choices[0].message.content.strip()
 
-    # 🔍 디버깅 (중요)
-    print("===== LLM RAW OUTPUT =====")
-    print(content)
-    print("==========================")
+    print("===== RAW LLM OUTPUT =====")
+    print(raw)
 
-    # 4. 코드블록 제거
-    content = content.replace("```json", "").replace("```", "").strip()
+    # 4. JSON 파싱
+    parsed = safe_json_parse(raw)
 
-    # 5. JSON 부분만 추출 (핵심)
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if match:
-        content = match.group()
+    # 5. 필드 보정
+    parsed = ensure_fields(parsed)
 
-    # 6. JSON 파싱
-    try:
-        parsed = json.loads(content)
-    except Exception as e:
-        print("❌ JSON 파싱 에러:", e)
-        print("❌ 문제 content:", content)
+    # 6. business 매핑
+    parsed["business"]["main"] = normalize_business(
+        parsed["business"].get("main", [])
+    )
 
-        parsed = {
-            "summary": "파싱 실패",
-            "issues": [],
-            "business": {"main": [], "description": ""},
-            "culture": {"keywords": [], "description": ""},
-            "job_insight": None,
-            "strategy": []
-        }
+    # 7. strategy 보정
+    parsed = normalize_strategy(parsed)
 
-    # 7. 최종 반환
+    # 8. fallback 보정
+    if len(parsed["issues"]) < 2:
+        parsed["issues"] = [
+            f"{company} 핵심 사업 경쟁 심화 가능성",
+            f"{company} 서비스 고도화 필요성"
+        ]
+
+    if len(parsed["strategy"]) == 0:
+        parsed["strategy"] = [
+            f"{company} AI 기반 서비스 고도화",
+            f"{company} 핵심 사업 경쟁력 강화"
+        ]
+
+    if len(parsed["business"]["main"]) == 0:
+        parsed["business"]["main"] = ["플랫폼"]
+
+    # 9. 추가 데이터
+    parsed["culture"] = crawl_company_culture(company)
+    parsed["career_url"] = get_company_career_url(company)
+
+    
     return {
         "status": "success",
         "company": company,
