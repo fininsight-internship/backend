@@ -157,11 +157,6 @@ async def generate_analysis_report(
 
         # 5. 채용 직무명 자동 판별 및 데이터 로드
         job_role = fit_result.get("job_analysis", {}).get("job_role", "지원 직무")
-        analysis_report = {
-            "job_analysis": fit_result.get("job_analysis", {}),
-            "fit_analysis": fit_result.get("fit_analysis", {}),
-            "document_optimization": fit_result.get("document_optimization", {})
-        }
 
         # 6. 사용자별 기존 동일 기업/직무 분석 결과가 있으면 업데이트(Upsert), 없으면 신규 생성
         jd_analysis = db.query(CompanyJDAnalysis).filter(
@@ -170,9 +165,21 @@ async def generate_analysis_report(
             CompanyJDAnalysis.job_role == job_role
         ).first()
 
+        # 기존 is_starred 값 유지
+        existing_starred = False
+        if jd_analysis and jd_analysis.analysis_report:
+            existing_starred = jd_analysis.analysis_report.get("is_starred", False)
+
+        analysis_report = {
+            "is_starred": existing_starred,
+            "company_analysis": company_report.company_analysis,
+            "job_analysis": fit_result.get("job_analysis", {}),
+            "fit_analysis": fit_result.get("fit_analysis", {}),
+            "document_optimization": fit_result.get("document_optimization", {})
+        }
+
         if jd_analysis:
             jd_analysis.jd_content = jd_text
-            jd_analysis.company_report_id = company_report.id
             jd_analysis.analysis_report = analysis_report
             jd_analysis.created_at = datetime.utcnow()
         else:
@@ -181,11 +188,10 @@ async def generate_analysis_report(
                 company_name=company_name,
                 job_role=job_role,
                 jd_content=jd_text,
-                company_report_id=company_report.id,
                 analysis_report=analysis_report
             )
             db.add(jd_analysis)
-        
+
         db.commit()
         db.refresh(jd_analysis)
 
@@ -194,7 +200,7 @@ async def generate_analysis_report(
             "id": jd_analysis.id,
             "company_name": company_name,
             "job_role": job_role,
-            "is_starred": jd_analysis.is_starred,
+            "is_starred": existing_starred,
             "company_analysis": company_report.company_analysis,
             "job_analysis": fit_result.get("job_analysis", {}),
             "fit_analysis": fit_result.get("fit_analysis", {}),
@@ -221,20 +227,17 @@ def get_saved_reports(
         
         results = []
         for item in analyses:
-            company_analysis = {}
-            if item.company_report:
-                company_analysis = item.company_report.company_analysis
-            
+            report = item.analysis_report or {}
             results.append({
                 "id": item.id,
                 "company_name": item.company_name,
                 "job_role": item.job_role,
-                "is_starred": item.is_starred,
+                "is_starred": report.get("is_starred", False),
                 "created_at": item.created_at.isoformat() if item.created_at else None,
-                "company_analysis": company_analysis,
-                "job_analysis": item.analysis_report.get("job_analysis", {}) if item.analysis_report else {},
-                "fit_analysis": item.analysis_report.get("fit_analysis", {}) if item.analysis_report else {},
-                "document_optimization": item.analysis_report.get("document_optimization", {}) if item.analysis_report else {}
+                "company_analysis": report.get("company_analysis", {}),
+                "job_analysis": report.get("job_analysis", {}),
+                "fit_analysis": report.get("fit_analysis", {}),
+                "document_optimization": report.get("document_optimization", {})
             })
         return {"success": True, "data": results}
     except Exception as e:
@@ -254,10 +257,13 @@ def toggle_star_report(
         if not analysis:
             raise HTTPException(status_code=404, detail="보고서를 찾을 수 없습니다.")
         
-        analysis.is_starred = not analysis.is_starred
+        report = analysis.analysis_report or {}
+        new_starred = not report.get("is_starred", False)
+        report["is_starred"] = new_starred
+        analysis.analysis_report = report
         db.commit()
         db.refresh(analysis)
-        return {"success": True, "is_starred": analysis.is_starred}
+        return {"success": True, "is_starred": new_starred}
     except HTTPException as he:
         raise he
     except Exception as e:
