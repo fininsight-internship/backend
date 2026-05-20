@@ -4,14 +4,17 @@ import json
 import re
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from openai import OpenAI
 import anthropic
 from google import genai as google_genai
+from sqlalchemy.orm import Session
 
+from app.core.db import get_db
+from app.models.db_models import User, InterviewSession, InterviewQuestion, FollowUpQuestion
 from app.services.interview_rag_data import (
     FEATURE_TAXONOMY,
     AVAILABLE_POSITIONS,
@@ -28,8 +31,48 @@ claude_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 client = openai_client  # backward-compat alias
 router = APIRouter(prefix="/interview")
 
-# 임시 메모리 저장소
-MOCK_SESSIONS: List[Dict[str, Any]] = []
+# ─── Current User Helper ───────────────────────────────────────
+def get_current_user(
+    db: Session,
+    x_user_id: Optional[str] = None,
+    x_user_email: Optional[str] = None
+) -> User:
+    """헤더 정보를 기반으로 로그인된 유저를 식별하며, 없는 경우 폴백 유저를 반환합니다."""
+    # 1. X-User-Id 우선 식별
+    if x_user_id:
+        try:
+            user = db.query(User).filter(User.id == int(x_user_id)).first()
+            if user:
+                return user
+        except ValueError:
+            pass
+
+    # 2. X-User-Email 식별
+    if x_user_email:
+        user = db.query(User).filter(User.email == x_user_email.strip().lower()).first()
+        if user:
+            return user
+
+    # 3. 폴백: DB 내에 등록된 첫 유저 반환
+    user = db.query(User).first()
+    if user:
+        return user
+
+    # 4. 폴백 2: DB가 비어있는 경우 디폴트 영구 사용자 생성 및 반환
+    default_email = "dbeaver_test@careerai.com"
+    user = db.query(User).filter(User.email == default_email).first()
+    if not user:
+        user = User(
+            email=default_email,
+            password_hash="hashed_password_12345",
+            name="디비버길동",
+            role="풀스택 개발자"
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    return user
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -91,6 +134,8 @@ class SaveSessionRequest(BaseModel):
     session_id: Optional[str] = None
     company: str
     job_role: str
+    interview_type: Optional[str] = "전체"
+    axis_type: Optional[str] = "static"
     axes_used: Optional[List[EvaluationAxisItem]] = None
     answers: List[AnswerItem]
 
@@ -519,9 +564,17 @@ def get_follow_up_question(req: FollowUpRequest):
 # ─────────────────────────────────────────────────────────────
 # 엔드포인트 6: 세션 저장
 # ─────────────────────────────────────────────────────────────
+# 엔드포인트 6: 세션 저장
+# ─────────────────────────────────────────────────────────────
 @router.post("/sessions")
-def save_interview_session(req: SaveSessionRequest):
-    """사용자가 작성한 면접 답변을 저장합니다 (임시 메모리)."""
+def save_interview_session(
+    req: SaveSessionRequest,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None)
+):
+    """사용자가 작성한 면접 답변을 데이터베이스에 저장(추가/업데이트)합니다."""
+    current_user = get_current_user(db, x_user_id, x_user_email)
     session_id = req.session_id or f"session-{uuid.uuid4().hex[:8]}"
     
     # Calculate some stats for the session
@@ -533,45 +586,181 @@ def save_interview_session(req: SaveSessionRequest):
     for a in req.answers:
         if a.feedback:
             try:
-                fb = json.loads(a.feedback)
-                if "overall_score" in fb:
+                # feedback은 문자열일 수도 있고 딕셔너리일 수도 있으므로 분기 처리
+                fb = json.loads(a.feedback) if isinstance(a.feedback, str) else a.feedback
+                if isinstance(fb, dict) and "overall_score" in fb:
                     scores.append(fb["overall_score"])
-            except:
+            except Exception as e:
+                print(f"피드백 점수 파싱 실패: {e}")
                 pass
     
     avg_score = None
     if scores:
         avg_score = sum(scores) / len(scores) * 20 # Convert 5-point to 100-point scale
 
-    session_data = {
-        "id": session_id,
-        "company": req.company,
-        "job_role": req.job_role,
-        "axes_used": [ax.dict() for ax in req.axes_used] if req.axes_used else [],
-        "answers": [a.dict() for a in req.answers],
-        "created_at": datetime.now().isoformat(),
-        "stats": {
-            "total_questions": total_q,
-            "answered_questions": answered_q,
-            "score": avg_score
-        }
+    stats_data = {
+        "total_questions": total_q,
+        "answered_questions": answered_q,
+        "score": avg_score
     }
     
-    existing_idx = next((i for i, s in enumerate(MOCK_SESSIONS) if s["id"] == session_id), -1)
-    if existing_idx >= 0:
-        MOCK_SESSIONS[existing_idx] = session_data
-        print(f"✅ 세션 업데이트 완료 (ID: {session_id})")
+    axes_used_data = [ax.dict() for ax in req.axes_used] if req.axes_used else []
+
+    # 1. 면접 세션(InterviewSession) 조회 또는 생성 (Upsert)
+    session = db.query(InterviewSession).filter(InterviewSession.id == session_id).first()
+    if session:
+        session.company_name = req.company
+        session.job_role = req.job_role
+        session.interview_type = req.interview_type or "전체"
+        session.axis_type = req.axis_type or "static"
+        session.axes_used = axes_used_data
+        session.stats = stats_data
+        print(f"✅ DB 세션 업데이트 진행 (ID: {session_id})")
     else:
-        MOCK_SESSIONS.append(session_data)
-        print(f"✅ 세션 저장 완료 (총 {len(MOCK_SESSIONS)}개)")
+        session = InterviewSession(
+            id=session_id,
+            user_id=current_user.id,
+            company_name=req.company,
+            job_role=req.job_role,
+            interview_type=req.interview_type or "전체",
+            axis_type=req.axis_type or "static",
+            axes_used=axes_used_data,
+            stats=stats_data
+        )
+        db.add(session)
+        print(f"✅ DB 신규 세션 생성 진행 (ID: {session_id})")
         
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"❌ 면접 세션 저장 에러: {e}")
+        raise HTTPException(status_code=500, detail=f"면접 세션 저장 실패: {str(e)}")
+
+    # 2. 면접 질문(InterviewQuestion) 개별 Upsert
+    for a in req.answers:
+        feedback_obj = None
+        if a.feedback:
+            try:
+                feedback_obj = json.loads(a.feedback) if isinstance(a.feedback, str) else a.feedback
+            except Exception:
+                feedback_obj = a.feedback
+                
+        question = db.query(InterviewQuestion).filter(
+            InterviewQuestion.session_id == session_id,
+            InterviewQuestion.id == a.id
+        ).first()
+        
+        if question:
+            question.question_text = a.question
+            question.category = a.category
+            question.evaluation_axis_key = a.evaluation_axis
+            question.axis_name = a.axis_name
+            question.tips = a.tips
+            question.user_answer = a.userAnswer
+            question.feedback = feedback_obj
+        else:
+            question = InterviewQuestion(
+                id=a.id,
+                session_id=session_id,
+                question_text=a.question,
+                category=a.category,
+                evaluation_axis_key=a.evaluation_axis,
+                axis_name=a.axis_name,
+                tips=a.tips,
+                user_answer=a.userAnswer,
+                feedback=feedback_obj
+            )
+            db.add(question)
+            
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"❌ 면접 질문 저장 에러: {e}")
+            raise HTTPException(status_code=500, detail=f"면접 질문 저장 실패: {str(e)}")
+
+        # 3. 꼬리질문(FollowUpQuestion) 동기화 (전체 삭제 후 다시 삽입하여 무결성 유지)
+        db.query(FollowUpQuestion).filter(FollowUpQuestion.question_id == question.id).delete()
+        
+        if a.followUps:
+            for fu in a.followUps:
+                fu_question = fu.get("question")
+                fu_intent = fu.get("intent")
+                fu_user_answer = fu.get("userAnswer")
+                fu_feedback = fu.get("feedback")
+                
+                new_fu = FollowUpQuestion(
+                    question_id=question.id,
+                    question_text=fu_question,
+                    intent=fu_intent,
+                    user_answer=fu_user_answer,
+                    feedback_text=fu_feedback
+                )
+                db.add(new_fu)
+                
+            try:
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                print(f"❌ 꼬리질문 저장 에러: {e}")
+                raise HTTPException(status_code=500, detail=f"꼬리질문 저장 실패: {str(e)}")
+
+    print(f"🎉 [DB] 세션(ID: {session_id}) 및 질문 전체 저장 완료!")
     return {"message": "면접 세션이 성공적으로 저장되었습니다.", "session_id": session_id}
 
 
 @router.get("/sessions")
-def get_sessions():
-    """저장된 모든 면접 세션을 반환합니다."""
-    return MOCK_SESSIONS
+def get_sessions(
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None)
+):
+    """현재 로그인된 사용자의 모든 저장된 면접 세션을 반환합니다."""
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    
+    sessions = db.query(InterviewSession).filter(
+        InterviewSession.user_id == current_user.id
+    ).order_by(InterviewSession.created_at.desc()).all()
+    
+    result = []
+    for s in sessions:
+        answers = []
+        for q in s.questions:
+            follow_ups = []
+            for fu in q.follow_ups:
+                follow_ups.append({
+                    "question": fu.question_text,
+                    "intent": fu.intent,
+                    "userAnswer": fu.user_answer or "",
+                    "feedback": fu.feedback_text
+                })
+            
+            answers.append({
+                "id": q.id,
+                "question": q.question_text,
+                "category": q.category,
+                "tips": q.tips or "",
+                "evaluation_axis": q.evaluation_axis_key,
+                "axis_name": q.axis_name,
+                "userAnswer": q.user_answer or "",
+                "feedback": q.feedback,
+                "followUps": follow_ups
+            })
+            
+        result.append({
+            "id": s.id,
+            "company": s.company_name,
+            "job_role": s.job_role,
+            "interview_type": s.interview_type,
+            "axis_type": s.axis_type,
+            "axes_used": s.axes_used,
+            "answers": answers,
+            "created_at": s.created_at.isoformat() if s.created_at else datetime.utcnow().isoformat(),
+            "stats": s.stats
+        })
+        
+    return result
 
 
 # ─────────────────────────────────────────────────────────────
