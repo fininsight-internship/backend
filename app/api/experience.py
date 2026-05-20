@@ -113,16 +113,14 @@ def get_user_experience(
                 "department": exp.department or "",
                 "startDate": exp.start_date or "",
                 "endDate": exp.end_date or "",
-                "detail": exp.detail or "",
-                "starData": exp.star_data or None
+                "detail": exp.detail or ""
             })
         elif exp.category == "교육부트캠프":
             bootcamps.append({
                 "id": str(exp.id),
                 "name": exp.title or "",
                 "topic": exp.topic or "",
-                "detail": exp.detail or "",
-                "starData": exp.star_data or None
+                "detail": exp.detail or ""
             })
         elif exp.category == "프로젝트":
             projects.append({
