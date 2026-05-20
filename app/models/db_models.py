@@ -12,11 +12,19 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     name = Column(String(100), nullable=True)
     role = Column(String(100), nullable=True) # 희망 직무 (예: 프론트엔드 개발자)
+    
+    # 세부 경험 추가 컬럼
+    eng_name = Column(String(255), nullable=True)
+    birth_date = Column(String(50), nullable=True)
+    education_list = Column(JSON, nullable=True)
+    certification_list = Column(JSON, nullable=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # 1:N 관계 정의
     resumes = relationship("Resume", back_populates="user", cascade="all, delete-orphan")
+    experiences = relationship("Experience", back_populates="user", cascade="all, delete-orphan")
     applications = relationship("Application", back_populates="user", cascade="all, delete-orphan")
     company_analyses = relationship("CompanyJDAnalysis", back_populates="user", cascade="all, delete-orphan")
     interview_sessions = relationship("InterviewSession", back_populates="user", cascade="all, delete-orphan")
@@ -37,6 +45,8 @@ class Resume(Base):
     # 관계 정의
     user = relationship("User", back_populates="resumes")
     experiences = relationship("Experience", back_populates="resume", cascade="all, delete-orphan")
+    questions = relationship("ResumeQuestion", back_populates="resume", cascade="all, delete-orphan")
+    evaluations = relationship("ResumeEvaluation", back_populates="resume", cascade="all, delete-orphan")
     resume_questions = relationship("ResumeQuestion", back_populates="resume", cascade="all, delete-orphan")
     resume_evaluations = relationship("ResumeEvaluation", back_populates="resume", cascade="all, delete-orphan")
 
@@ -45,15 +55,29 @@ class Experience(Base):
     __tablename__ = "experiences"
     
     id = Column(Integer, primary_key=True, index=True)
-    resume_id = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=False)
-    company_name = Column(String(255), nullable=False)
-    role = Column(String(255), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    resume_id = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=True)
+    
+    # 활동 구분 및 공통/특화 필드
+    category = Column(String(100), nullable=True) # '경력인턴', '교육부트캠프', '프로젝트', '동아리', '봉사활동', '기타경험'
+    title = Column(String(255), nullable=True) # 활동명, 회사명, 교육/부트캠프명 등
+    detail = Column(Text, nullable=True) # 상세 경험 내용
+    
+    # 특화 상세 필드
+    department = Column(String(255), nullable=True) # 경력 부서
+    topic = Column(String(255), nullable=True) # 교육/부트캠프 주제
+    
+    # 기존 호환성 및 공통 기간 필드
+    company_name = Column(String(255), nullable=True)
+    role = Column(String(255), nullable=True)
     start_date = Column(String(50), nullable=True)
     end_date = Column(String(50), nullable=True)
     description = Column(Text, nullable=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # 관계 정의
+    user = relationship("User", back_populates="experiences")
     resume = relationship("Resume", back_populates="experiences")
 
 
@@ -65,6 +89,7 @@ class Application(Base):
     company_name = Column(String(255), nullable=False)
     job_role = Column(String(255), nullable=False)
     status = Column(String(100), nullable=False, default="지원대기") # 서류합격, 면접대기 등
+    progress_status = Column(String(255), nullable=True, default="자소서작성:진행중") # 진행 상태
     applied_date = Column(Date, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -169,6 +194,51 @@ class ChatMessage(Base):
 
     # 관계 정의
     session = relationship("ChatSession", back_populates="messages")
+
+
+class ResumeQuestion(Base):
+    __tablename__ = "resume_questions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    resume_id = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=False)
+    question_number = Column(Integer, nullable=False)
+    question_content = Column(Text, nullable=True) # 사용자가 작성한 문항 답변
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # 관계 정의
+    resume = relationship("Resume", back_populates="questions")
+    evaluations = relationship("ResumeQuestionEvaluation", back_populates="question", cascade="all, delete-orphan")
+
+
+class ResumeEvaluation(Base):
+    __tablename__ = "resume_evaluations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    resume_id = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=False)
+    overall_score = Column(Float, nullable=True) # 종합 점수 (0~100)
+    strengths = Column(JSON, nullable=True) # 강점 목록 (JSON 배열)
+    improvements = Column(JSON, nullable=True) # 개선점 목록 (JSON 배열)
+    overall_feedback = Column(Text, nullable=True) # AI 종합 피드백
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # 관계 정의
+    resume = relationship("Resume", back_populates="evaluations")
+
+
+class ResumeQuestionEvaluation(Base):
+    __tablename__ = "resume_question_evaluations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, ForeignKey("resume_questions.id", ondelete="CASCADE"), nullable=False)
+    question_score = Column(Float, nullable=True) # 문항별 점수 (0~100)
+    strengths = Column(JSON, nullable=True) # 문항별 강점
+    improvements = Column(JSON, nullable=True) # 문항별 개선점
+    feedback = Column(Text, nullable=True) # 문항별 피드백
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # 관계 정의
+    question = relationship("ResumeQuestion", back_populates="evaluations")
 
 
 class ResumeQuestion(Base):
