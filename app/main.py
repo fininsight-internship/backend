@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.api import company, jd, resume, interview, analysis, chat, auth
+from app.api import company, jd, resume, interview, analysis, chat, auth, experience
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.db import engine
@@ -27,3 +27,4 @@ app.include_router(analysis.router)
 app.include_router(jd.router)
 app.include_router(resume.router)
 app.include_router(interview.router)
+app.include_router(experience.router)
