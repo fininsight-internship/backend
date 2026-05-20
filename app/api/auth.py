@@ -5,6 +5,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.models.db_models import User
+from app.core.auth import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -100,3 +101,56 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
             "role": user.role
         }
     }
+
+class UserUpdateModel(BaseModel):
+    name: Optional[str] = None
+    eng_name: Optional[str] = None
+    birth_date: Optional[str] = None
+    role: Optional[str] = None
+
+@router.get("/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    return {
+        "status": "success",
+        "data": {
+            "id": current_user.id,
+            "email": current_user.email,
+            "name": current_user.name or "",
+            "eng_name": current_user.eng_name or "",
+            "birth_date": current_user.birth_date or "",
+            "role": current_user.role or ""
+        }
+    }
+
+@router.put("/me")
+def update_me(req: UserUpdateModel, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if req.name is not None:
+        current_user.name = req.name
+    if req.eng_name is not None:
+        current_user.eng_name = req.eng_name
+    if req.birth_date is not None:
+        current_user.birth_date = req.birth_date
+    if req.role is not None:
+        current_user.role = req.role
+        
+    try:
+        db.commit()
+        db.refresh(current_user)
+        return {
+            "status": "success",
+            "message": "개인정보가 성공적으로 수정되었습니다.",
+            "data": {
+                "id": current_user.id,
+                "email": current_user.email,
+                "name": current_user.name or "",
+                "eng_name": current_user.eng_name or "",
+                "birth_date": current_user.birth_date or "",
+                "role": current_user.role or ""
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"개인정보 수정 실패: {str(e)}"
+        )
