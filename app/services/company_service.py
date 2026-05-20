@@ -3,6 +3,8 @@ import json
 import re
 from dotenv import load_dotenv
 from openai import OpenAI
+from sqlalchemy.orm import Session
+from app.models.db_models import CompanyReport
 
 from app.crawler.news_crawler import crawl_news
 from app.crawler.company_crawler import crawl_company_culture
@@ -127,7 +129,22 @@ def ensure_fields(parsed: dict):
 
 
 # 🔹 기업 분석
-def generate_company_report(company: str, job: str = None):
+def generate_company_report(db: Session, company: str, job: str = None):
+    # 0. 캐시 확인
+    cached = db.query(CompanyReport).filter(CompanyReport.company_name == company).first()
+    if cached and cached.company_analysis:
+        analysis_data = cached.company_analysis
+        if isinstance(analysis_data, str):
+            try:
+                analysis_data = json.loads(analysis_data)
+            except:
+                pass
+        return {
+            "status": "success",
+            "company": company,
+            "job": job,
+            "data": analysis_data
+        }
 
     # 1. 뉴스 수집
     news_contents = crawl_news(company)
@@ -212,6 +229,18 @@ def generate_company_report(company: str, job: str = None):
     parsed["culture"] = crawl_company_culture(company)
     parsed["career_url"] = get_company_career_url(company)
 
+    # 10. DB 캐시에 저장
+    try:
+        new_report = CompanyReport(
+            company_name=company,
+            company_info=parsed.get("summary", ""),
+            company_analysis=parsed
+        )
+        db.add(new_report)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[company_service] 캐시 저장 실패: {e}")
     
     return {
         "status": "success",
