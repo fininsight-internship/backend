@@ -16,15 +16,24 @@ from app.models.db_models import (
     InterviewQuestion, 
     FollowUpQuestion, 
     ChatSession, 
-    ChatMessage
+    ChatMessage,
+    ResumeQuestion,
+    ResumeEvaluation,
+    ResumeQuestionEvaluation
 )
 
 def init_db():
-    print("🚀 PostgreSQL 'careerai' 데이터베이스에 접속하여 테이블을 생성하는 중...")
+    print("🚀 PostgreSQL 'careerai' 데이터베이스 테이블 재생성 중...")
     try:
+        # 기존 테이블들 초기화 (마이그레이션 및 컬럼 변경 반영을 위해 재생성)
+        Base.metadata.drop_all(bind=engine)
         # 설계된 모든 테이블 자동 생성
         Base.metadata.create_all(bind=engine)
         print("🎉 대박! 모든 데이터베이스 테이블이 성공적으로 생성되었습니다!")
+        
+        # 테스트용 영구 계정 자동 시드 생성
+        from app.create_permanent_user import create_permanent_user
+        create_permanent_user()
     except Exception as e:
         print("❌ 데이터베이스 초기화 중 에러가 발생했습니다:", e)
 
