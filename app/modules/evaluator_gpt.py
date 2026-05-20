@@ -7,73 +7,71 @@ from dotenv import load_dotenv
 load_dotenv()
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# ============================================================
-# 평가 원칙:
-# - 자소서가 "사용자가 선택한 답변"과 일치하는지 검사한다.
-# - 원본 경험 입력값이 적더라도, 선택한 내용과 자소서가 맞으면 OK.
-# - 0점은 오직 명백한 허구(없는 수치, 존재하지 않는 프로젝트)만 해당.
-# ============================================================
+SYSTEM_PROMPT = """당신은 전직 대기업 인사팀장 출신 자소서 전문 컨설턴트입니다.
+수천 건의 자소서를 검토한 경험을 바탕으로 합격/불합격을 좌우하는 핵심 요소를 정확히 짚어냅니다.
 
-SYSTEM_PROMPT = """당신은 33만 취준생의 멘토 **'면접왕 이형'**입니다. 전직 인사팀장으로서 자소서를 냉정하게 평가합니다.
+[평가 원칙]
+- 사용자가 선택한 답변과 자소서 내용의 일치 여부를 최우선으로 본다.
+- 경험 자체가 빈약해도 선택 내용과 자소서가 논리적으로 맞으면 감점 최소화.
+- 0점은 선택 답변에 없는 완전히 새로운 수치나 존재하지 않는 프로젝트명이 등장할 때만 해당.
+- 개선안은 반드시 원문을 실제로 대체할 수 있는 완성 문장으로 제시."""
 
-[⚖️ 평가 기준]
-1. 자소서의 내용이 "사용자가 선택한 답변"과 논리적으로 일치하는가?
-2. 3C-4P 구조가 갖춰졌는가? (배경 20% 이내, 행동과 성과 70% 이상)
-3. "열심히", "최선을 다해" 같은 추상적 표현이 있는가?
-4. 면접에서 공격받을 약점이 있는가?
-
-[🚫 0점 기준 - 명백한 허구만 해당]
-선택 답변에 없는 완전히 새로운 수치나 존재하지 않는 프로젝트명이 등장할 때만 0점 처리.
-단순히 경험이 적거나 표현이 부족한 것은 감점 요인이지 0점이 아닙니다.
-"""
-
-USER_PROMPT_TEMPLATE = """[사용자가 선택한 답변]
-{selections}
+USER_PROMPT_TEMPLATE = """[자기소개서 문항]
+{question}
 
 [기업/직무 정보]
 {insights}
 
-[자기소개서 문항]
-{question}
+[사용자가 선택한 핵심 답변]
+{selections}
 
-[작성된 자소서]
+[작성된 자기소개서]
 {draft}
 
 ---
-아래 형식으로 평가하세요:
+아래 형식으로 평가하세요. 각 항목을 빠짐없이 작성하세요.
 
-### 🎯 [면접왕 이형의 합격 성적표]
+### 🎯 합격 성적표
 **총점: 00점 / 100점**
 
-#### 1. 🔍 3C-4P 구조 분석
-- **배경(Context)**:
-- **핵심 행동(Core)**:
-- **수치 성과(Proof)**:
+#### 📊 항목별 점수
+| 항목 | 점수 | 평가 |
+|------|------|------|
+| 내용 일치도 (선택 답변 반영) | 00/30 | ... |
+| 구체성·수치 활용 | 00/25 | ... |
+| 구조·흐름 | 00/20 | ... |
+| 기업 연결성 | 00/15 | ... |
+| 문장 완성도 | 00/10 | ... |
 
-#### 2. ⚡️ 개선 필요 문장 TOP 2
+#### 🔍 구조 분석
+- **Hook(첫 문장)**: 임팩트 있음 / 평범함 / 개선 필요 — (이유 한 줄)
+- **배경·상황**: (분량이 적절한지, 너무 길면 지적)
+- **핵심 행동**: (구체적인지, STAR A가 잘 녹아있는지)
+- **성과·결과**: (수치가 있는지, 없으면 대안 제시)
+- **기업 연결**: ({company_keyword}과의 연결이 자연스러운지)
 
-**[원문]** "..."
+#### ⚡ 개선 필요 문장 TOP 2
 
-**[문제점]** ...
+**[1번]**
+원문: "..."
+문제: ...
+개선안: "..."
 
-**[이형의 대안]** "..."
+**[2번]**
+원문: "..."
+문제: ...
+개선안: "..."
 
----
+#### 🚨 면접 리스크
+이 자소서를 본 면접관이 공격적으로 파고들 수 있는 포인트 1~2개를 제시하고, 대비 방법을 알려주세요.
 
-**[원문]** "..."
-
-**[문제점]** ...
-
-**[이형의 대안]** "..."
-
-#### 3. 🚀 한 줄 총평
-"..."
+#### 💬 한 줄 총평
+"..." (합격 가능성 판단 포함)
 """
 
 
 class EvaluatorGPT:
     def evaluate(self, draft: str, context: dict) -> str:
-        print("[EvaluatorGemini] 자소서 평가 시작 (선택 답변 기준)...")
         try:
             selections = context.get("selections", [])
             if isinstance(selections, list):
@@ -84,23 +82,30 @@ class EvaluatorGPT:
             else:
                 sel_text = str(selections)
 
+            insights = str(context.get("insights", ""))
+            question = str(context.get("question", ""))
+
+            # 기업명 추출 (첫 단어 또는 전체)
+            company_keyword = insights.split()[0] if insights.strip() else "해당 기업"
+
             user_prompt = USER_PROMPT_TEMPLATE \
-                .replace("{selections}", sel_text) \
-                .replace("{insights}", str(context.get("insights", ""))) \
-                .replace("{question}", str(context.get("question", ""))) \
-                .replace("{draft}", draft)
+                .replace("{selections}", sel_text or "선택 답변 없음") \
+                .replace("{insights}", insights) \
+                .replace("{question}", question) \
+                .replace("{draft}", draft) \
+                .replace("{company_keyword}", company_keyword)
 
             response = _client.models.generate_content(
                 model="gemini-2.5-pro",
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_PROMPT,
-                    temperature=0,
+                    temperature=0.1,
                 ),
             )
             return response.text
         except Exception as e:
-            print(f"[EvaluatorGemini] 오류: {e}")
+            print(f"[EvaluatorGPT] 오류: {e}")
             return f"평가 중 오류가 발생했습니다: {str(e)}"
 
     def parse_total_score(self, evaluation_text: str) -> int:
