@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.services import resume_service
+from app.models.db_models import CompanyJDAnalysis
 from app.core.db import get_db
 
 router = APIRouter(prefix="/resume", tags=["Resume"])
@@ -206,6 +207,30 @@ async def experience_match(req: ExperienceMatchRequest):
         return resume_service.match_experiences(req.question, req.experiences)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── JD 분석 조회 ─────────────────────────────────────────────────────
+
+@router.get("/jd-info")
+def jd_info(user_id: int, company_name: str, job_role: str, db: Session = Depends(get_db)):
+    """해당 유저의 company_jd_analysis 테이블에서 JD 분석 결과를 반환한다."""
+    row = (
+        db.query(CompanyJDAnalysis)
+        .filter(
+            CompanyJDAnalysis.user_id == user_id,
+            CompanyJDAnalysis.company_name == company_name,
+            CompanyJDAnalysis.job_role == job_role,
+        )
+        .order_by(CompanyJDAnalysis.id.desc())
+        .first()
+    )
+    if not row:
+        return {"status": "not_found", "jd_content": None, "analysis_report": None}
+    return {
+        "status": "success",
+        "jd_content": row.jd_content,
+        "analysis_report": row.analysis_report,
+    }
 
 
 # ── Cover letter draft DB CRUD ──────────────────────────────────────
