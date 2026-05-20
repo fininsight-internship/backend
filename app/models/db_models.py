@@ -211,46 +211,47 @@ class ChatMessage(Base):
 
 class ResumeQuestion(Base):
     __tablename__ = "resume_questions"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     resume_id = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     question_number = Column(Integer, nullable=False)
-    question_content = Column(Text, nullable=True) # 사용자가 작성한 문항 답변
+    question_text = Column(Text, nullable=True)    # 문항 질문 텍스트
+    question_content = Column(Text, nullable=True) # 완성된 자소서 답변
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # 관계 정의
-    resume = relationship("Resume", back_populates="questions")
+
+    resume = relationship("Resume", back_populates="resume_questions")
     evaluations = relationship("ResumeQuestionEvaluation", back_populates="question", cascade="all, delete-orphan")
 
 
 class ResumeEvaluation(Base):
     __tablename__ = "resume_evaluations"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     resume_id = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=False)
-    overall_score = Column(Float, nullable=True) # 종합 점수 (0~100)
-    strengths = Column(JSON, nullable=True) # 강점 목록 (JSON 배열)
-    improvements = Column(JSON, nullable=True) # 개선점 목록 (JSON 배열)
-    overall_feedback = Column(Text, nullable=True) # AI 종합 피드백
+    overall_score = Column(Float, nullable=True)
+    strengths = Column(JSON, nullable=True)
+    improvements = Column(JSON, nullable=True)
+    overall_feedback = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # 관계 정의
-    resume = relationship("Resume", back_populates="evaluations")
+
+    resume = relationship("Resume", back_populates="resume_evaluations")
 
 
 class ResumeQuestionEvaluation(Base):
     __tablename__ = "resume_question_evaluations"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     question_id = Column(Integer, ForeignKey("resume_questions.id", ondelete="CASCADE"), nullable=False)
-    question_score = Column(Float, nullable=True) # 문항별 점수 (0~100)
-    strengths = Column(JSON, nullable=True) # 문항별 강점
-    improvements = Column(JSON, nullable=True) # 문항별 개선점
-    feedback = Column(Text, nullable=True) # 문항별 피드백
+    resume_id = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    question_score = Column(Float, nullable=True)
+    strengths = Column(JSON, nullable=True)
+    improvements = Column(JSON, nullable=True)
+    feedback = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # 관계 정의
+
     question = relationship("ResumeQuestion", back_populates="evaluations")
 
 
