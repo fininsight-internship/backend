@@ -138,17 +138,25 @@ def match_experiences(question: str, experiences: list) -> dict:
     exp_lines = []
     for exp in experiences:
         star = exp.get("starData") or {}
-        star_text = ""
-        if star:
+        has_star = bool(star and any(star.get(k, "").strip() for k in ("S", "T", "A", "R")))
+        if has_star:
             parts = [f"S: {star.get('S','')}", f"T: {star.get('T','')}", f"A: {star.get('A','')}", f"R: {star.get('R','')}"]
             star_text = "\n  " + "\n  ".join(p for p in parts if p.split(": ", 1)[1])
+            detail_note = ""
+        else:
+            star_text = ""
+            detail_note = " [세부 내용 없음 — 이름만 등록된 경험]"
         exp_lines.append(
             f"[ID: {exp['id']}] {exp.get('company','')} / {exp.get('role','')} "
-            f"| 기술: {', '.join(exp.get('tags', []))}{star_text}"
+            f"| 기술: {', '.join(exp.get('tags', []))}{detail_note}{star_text}"
         )
 
     prompt = f"""자소서 문항에 대해 각 경험의 매칭율(0-100 정수)을 평가해주세요.
 매칭율은 해당 경험이 이 문항을 답변하는 데 얼마나 적합한지를 나타냅니다.
+
+평가 기준:
+- STAR 세부 내용이 있는 경험: 문항과의 실제 연관성을 바탕으로 0-100 범위에서 평가
+- "[세부 내용 없음]" 표시 경험: 이름만으로는 판단 불가이므로 반드시 20 이하로 평가
 
 [자소서 문항]
 {question}
@@ -211,8 +219,6 @@ def get_drafts(db: Session, user_id: int, company_name: str, job_title: str) -> 
     question_texts = (resume.parsed_content or {}).get("questions", [])
     result = []
     for rq in sorted(resume.resume_questions, key=lambda x: x.question_number):
-        if not rq.question_content or not rq.question_content.strip():
-            continue  # 빈 content 행은 반환하지 않음
         idx = rq.question_number - 1
         q_text = rq.question_text or (question_texts[idx] if idx < len(question_texts) else "")
         latest_eval = rq.evaluations[-1] if rq.evaluations else None
@@ -230,17 +236,8 @@ def get_drafts(db: Session, user_id: int, company_name: str, job_title: str) -> 
 def save_draft(db: Session, user_id: int, company_name: str, job_title: str,
                question_text: str, draft_content: str,
                ai_score: float = None, ai_feedback: str = None) -> dict:
-    """완성된 문항별 자소서를 저장한다. 빈 내용은 저장하지 않는다."""
-    # 빈 내용은 저장하지 않음
-    if not draft_content or not draft_content.strip():
-        return {
-            "id": None,
-            "question_text": question_text,
-            "draft_content": "",
-            "ai_score": None,
-            "ai_feedback": "",
-            "updated_at": None,
-        }
+    """완성된 문항별 자소서를 저장한다."""
+    draft_content = draft_content or ""
 
     resume = _find_or_create_resume(db, user_id, company_name, job_title)
 
@@ -252,8 +249,11 @@ def save_draft(db: Session, user_id: int, company_name: str, job_title: str,
 
     question_number = questions.index(question_text) + 1
 
-    # resume_questions upsert (완성된 자소서 답변 저장)
-    rq = next((q for q in resume.resume_questions if q.question_number == question_number), None)
+    # resume_questions upsert — ORM 캐시 우회해 직접 쿼리
+    rq = db.query(ResumeQuestion).filter(
+        ResumeQuestion.resume_id == resume.id,
+        ResumeQuestion.question_number == question_number,
+    ).first()
     if rq:
         rq.question_text = question_text
         rq.question_content = draft_content
@@ -284,14 +284,19 @@ def save_draft(db: Session, user_id: int, company_name: str, job_title: str,
     else:
         latest_eval = rq.evaluations[-1] if rq.evaluations else None
 
-    # resumes.raw_content — 전체 자소서 조합 텍스트 갱신
+    # resumes.raw_content — 관계 캐시 우회해 직접 쿼리로 전체 조합
     db.flush()
-    all_rqs = sorted(resume.resume_questions, key=lambda x: x.question_number)
+    all_rqs = (
+        db.query(ResumeQuestion)
+        .filter(ResumeQuestion.resume_id == resume.id)
+        .order_by(ResumeQuestion.question_number)
+        .all()
+    )
     assembled = "\n\n".join(
         f"[문항 {r.question_number}] {r.question_text or ''}\n{r.question_content or ''}"
         for r in all_rqs if r.question_content and r.question_content.strip()
     )
-    resume.raw_content = assembled
+    resume.raw_content = assembled or None
 
     db.commit()
     db.refresh(rq)
