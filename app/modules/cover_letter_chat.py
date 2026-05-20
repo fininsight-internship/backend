@@ -190,4 +190,22 @@ def generate_final_letter(
         system=FINAL_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
     )
-    return response.content[0].text
+    result = response.content[0].text
+
+    # 글자수 초과 시 1회 재시도
+    if char_limit > 0 and len(result) > char_limit:
+        retry_prompt = (
+            f"방금 작성한 자소서가 {len(result)}자입니다. "
+            f"반드시 {char_limit}자 이내(공백 포함)로 줄여서 다시 작성해주세요. "
+            f"핵심 내용(수치, 행동, 기업 연결)은 유지하되 불필요한 수식어를 제거하세요.\n\n"
+            f"[이전 작성본]\n{result}"
+        )
+        retry = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            system=FINAL_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": retry_prompt}],
+        )
+        result = retry.content[0].text
+
+    return result
