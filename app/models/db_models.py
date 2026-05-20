@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Date, ForeignKey, Float, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, Date, ForeignKey, Float, JSON, Boolean
 from sqlalchemy.orm import relationship
 from app.core.db import Base
 
@@ -97,6 +97,17 @@ class Application(Base):
     user = relationship("User", back_populates="applications")
 
 
+class CompanyReport(Base):
+    __tablename__ = "company_reports"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    company_name = Column(String(255), unique=True, nullable=False, index=True)
+    company_info = Column(Text, nullable=True)
+    company_analysis = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class CompanyJDAnalysis(Base):
     __tablename__ = "company_jd_analysis"
     
@@ -105,12 +116,14 @@ class CompanyJDAnalysis(Base):
     company_name = Column(String(255), nullable=False)
     job_role = Column(String(255), nullable=False)
     jd_content = Column(Text, nullable=True)
-    company_report = Column(Text, nullable=True)
+    company_report_id = Column(Integer, ForeignKey("company_reports.id", ondelete="SET NULL"), nullable=True)
     analysis_report = Column(JSON, nullable=True)
+    is_starred = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # 관계 정의
     user = relationship("User", back_populates="company_analyses")
+    company_report = relationship("CompanyReport")
 
 
 class InterviewSession(Base):
