@@ -4,13 +4,18 @@ import json
 import re
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from openai import OpenAI
 import anthropic
 from google import genai as google_genai
+from sqlalchemy.orm import Session
+
+from app.core.db import get_db
+from app.core.auth import get_current_user
+from app.models.db_models import User, InterviewSession, InterviewQuestion, FollowUpQuestion
 
 from app.services.interview_rag_data import (
     FEATURE_TAXONOMY,
@@ -27,9 +32,6 @@ claude_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 client = openai_client  # backward-compat alias
 router = APIRouter(prefix="/interview")
-
-# 임시 메모리 저장소
-MOCK_SESSIONS: List[Dict[str, Any]] = []
 
 
 # ─────────────────────────────────────────────────────────────
@@ -520,58 +522,197 @@ def get_follow_up_question(req: FollowUpRequest):
 # 엔드포인트 6: 세션 저장
 # ─────────────────────────────────────────────────────────────
 @router.post("/sessions")
-def save_interview_session(req: SaveSessionRequest):
-    """사용자가 작성한 면접 답변을 저장합니다 (임시 메모리)."""
+def save_interview_session(
+    req: SaveSessionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """사용자가 작성한 면접 답변을 저장합니다 (데이터베이스 연동)."""
     session_id = req.session_id or f"session-{uuid.uuid4().hex[:8]}"
     
-    # Calculate some stats for the session
+    # 세션 통계 계산
     total_q = len(req.answers)
     answered_q = sum(1 for a in req.answers if a.userAnswer and a.userAnswer.strip())
     
-    # Simple score calculation if feedback exists
     scores = []
     for a in req.answers:
         if a.feedback:
             try:
-                fb = json.loads(a.feedback)
-                if "overall_score" in fb:
+                fb = a.feedback
+                if isinstance(fb, str):
+                    fb = json.loads(fb)
+                if isinstance(fb, dict) and "overall_score" in fb:
                     scores.append(fb["overall_score"])
-            except:
+            except Exception:
                 pass
     
     avg_score = None
     if scores:
         avg_score = sum(scores) / len(scores) * 20 # Convert 5-point to 100-point scale
-
-    session_data = {
-        "id": session_id,
-        "company": req.company,
-        "job_role": req.job_role,
-        "axes_used": [ax.dict() for ax in req.axes_used] if req.axes_used else [],
-        "answers": [a.dict() for a in req.answers],
-        "created_at": datetime.now().isoformat(),
-        "stats": {
-            "total_questions": total_q,
-            "answered_questions": answered_q,
-            "score": avg_score
-        }
+ 
+    stats_data = {
+        "total_questions": total_q,
+        "answered_questions": answered_q,
+        "score": avg_score
     }
     
-    existing_idx = next((i for i, s in enumerate(MOCK_SESSIONS) if s["id"] == session_id), -1)
-    if existing_idx >= 0:
-        MOCK_SESSIONS[existing_idx] = session_data
-        print(f"✅ 세션 업데이트 완료 (ID: {session_id})")
+    # 1. 기존 세션 존재 여부 확인
+    session_db = db.query(InterviewSession).filter(
+        InterviewSession.id == session_id,
+        InterviewSession.user_id == current_user.id
+    ).first()
+    
+    axes_used_json = [ax.model_dump() for ax in req.axes_used] if req.axes_used else []
+    
+    if session_db:
+        # 기존 세션 업데이트
+        session_db.company_name = req.company
+        session_db.job_role = req.job_role
+        session_db.axes_used = axes_used_json
+        session_db.stats = stats_data
     else:
-        MOCK_SESSIONS.append(session_data)
-        print(f"✅ 세션 저장 완료 (총 {len(MOCK_SESSIONS)}개)")
+        # 새 세션 생성
+        axis_type = "dynamic" if req.axes_used and len(req.axes_used) > 0 and any(ax.key not in FEATURE_TAXONOMY for ax in req.axes_used) else "static"
+        session_db = InterviewSession(
+            id=session_id,
+            user_id=current_user.id,
+            company_name=req.company,
+            job_role=req.job_role,
+            interview_type="전체",
+            axis_type=axis_type,
+            axes_used=axes_used_json,
+            stats=stats_data,
+            created_at=datetime.utcnow()
+        )
+        db.add(session_db)
         
-    return {"message": "면접 세션이 성공적으로 저장되었습니다.", "session_id": session_id}
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"세션 헤더 저장 실패: {str(e)}")
+        
+    # 2. 질문 및 답변 (InterviewQuestion) 저장
+    for a in req.answers:
+        q_id = a.id or f"q-{uuid.uuid4().hex[:8]}"
+        
+        # 피드백 JSON 파싱
+        feedback_json = None
+        if a.feedback:
+            try:
+                feedback_json = a.feedback
+                if isinstance(feedback_json, str):
+                    feedback_json = json.loads(feedback_json)
+            except Exception:
+                feedback_json = {"raw": a.feedback}
+                
+        # 기존 질문이 있는지 확인
+        q_db = db.query(InterviewQuestion).filter(
+            InterviewQuestion.id == q_id,
+            InterviewQuestion.session_id == session_id
+        ).first()
+        
+        if q_db:
+            q_db.question_text = a.question
+            q_db.category = a.category
+            q_db.evaluation_axis_key = a.evaluation_axis
+            q_db.axis_name = a.axis_name
+            q_db.tips = a.tips
+            q_db.user_answer = a.userAnswer
+            q_db.feedback = feedback_json
+        else:
+            q_db = InterviewQuestion(
+                id=q_id,
+                session_id=session_id,
+                question_text=a.question,
+                category=a.category,
+                evaluation_axis_key=a.evaluation_axis,
+                axis_name=a.axis_name,
+                axis_weight=None,
+                tips=a.tips,
+                user_answer=a.userAnswer,
+                feedback=feedback_json,
+                created_at=datetime.utcnow()
+            )
+            db.add(q_db)
+            
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"면접 질문 저장 실패: {str(e)}")
+            
+        # 3. 꼬리질문 (FollowUpQuestion) 저장
+        if a.followUps:
+            db.query(FollowUpQuestion).filter(FollowUpQuestion.question_id == q_id).delete()
+            for fu in a.followUps:
+                fu_db = FollowUpQuestion(
+                    question_id=q_id,
+                    question_text=fu.get("question", ""),
+                    intent=fu.get("intent", ""),
+                    user_answer=fu.get("userAnswer") or fu.get("user_answer", ""),
+                    feedback_text=fu.get("feedback") or fu.get("feedback_text", ""),
+                    created_at=datetime.utcnow()
+                )
+                db.add(fu_db)
+                
+            try:
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                raise HTTPException(status_code=500, detail=f"꼬리질문 저장 실패: {str(e)}")
+                
+    return {"message": "면접 세션이 데이터베이스에 성공적으로 저장되었습니다.", "session_id": session_id}
 
 
 @router.get("/sessions")
-def get_sessions():
-    """저장된 모든 면접 세션을 반환합니다."""
-    return MOCK_SESSIONS
+def get_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """저장된 모든 면접 세션을 반환합니다 (데이터베이스 연동)."""
+    sessions_db = db.query(InterviewSession).filter(
+        InterviewSession.user_id == current_user.id
+    ).order_by(InterviewSession.created_at.desc()).all()
+    
+    result = []
+    for s in sessions_db:
+        answers = []
+        for q in s.questions:
+            # 꼬리질문 조회
+            follow_ups = []
+            for fu in q.follow_ups:
+                follow_ups.append({
+                    "question": fu.question_text,
+                    "intent": fu.intent,
+                    "userAnswer": fu.user_answer,
+                    "feedback": fu.feedback_text
+                })
+                
+            answers.append({
+                "id": q.id,
+                "question": q.question_text,
+                "category": q.category,
+                "tips": q.tips,
+                "evaluation_axis": q.evaluation_axis_key,
+                "axis_name": q.axis_name,
+                "axis_weight": q.axis_weight,
+                "userAnswer": q.user_answer,
+                "feedback": q.feedback,
+                "followUps": follow_ups
+            })
+            
+        result.append({
+            "id": s.id,
+            "company": s.company_name,
+            "job_role": s.job_role,
+            "axes_used": s.axes_used,
+            "answers": answers,
+            "created_at": s.created_at.isoformat(),
+            "stats": s.stats
+        })
+        
+    return result
 
 
 # ─────────────────────────────────────────────────────────────
