@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Header
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from pydantic import BaseModel
 
 from app.core.db import get_db
@@ -126,29 +126,25 @@ def get_user_experience(
             projects.append({
                 "id": str(exp.id),
                 "title": exp.title or "",
-                "detail": exp.detail or "",
-                "starData": exp.star_data or None
+                "detail": exp.detail or ""
             })
         elif exp.category == "동아리":
             clubs.append({
                 "id": str(exp.id),
                 "title": exp.title or "",
-                "detail": exp.detail or "",
-                "starData": exp.star_data or None
+                "detail": exp.detail or ""
             })
         elif exp.category == "봉사활동":
             volunteers.append({
                 "id": str(exp.id),
                 "title": exp.title or "",
-                "detail": exp.detail or "",
-                "starData": exp.star_data or None
+                "detail": exp.detail or ""
             })
         elif exp.category == "기타경험":
             others.append({
                 "id": str(exp.id),
                 "title": exp.title or "",
-                "detail": exp.detail or "",
-                "starData": exp.star_data or None
+                "detail": exp.detail or ""
             })
 
     return {
@@ -211,7 +207,6 @@ def save_user_experience(
                     start_date=c.startDate,
                     end_date=c.endDate,
                     detail=c.detail,
-                    # 하위 호환 매핑
                     company_name=c.company,
                     role=c.department,
                     description=c.detail
@@ -227,7 +222,6 @@ def save_user_experience(
                     title=b.name,
                     topic=b.topic,
                     detail=b.detail,
-                    # 하위 호환 매핑
                     company_name=b.name,
                     role=b.topic,
                     description=b.detail
@@ -250,7 +244,6 @@ def save_user_experience(
                         category=cat,
                         title=item.title,
                         detail=item.detail,
-                        # 하위 호환 매핑
                         company_name=item.title,
                         description=item.detail
                     )
@@ -266,19 +259,19 @@ def save_user_experience(
         raise HTTPException(status_code=500, detail=f"데이터베이스 저장 중 심각한 오류가 발생했습니다: {str(e)}")
 
 
-class StarDataUpdateRequest(BaseModel):
-    star_data: Dict[str, str]
+class DetailUpdateRequest(BaseModel):
+    detail: str
 
 
-@router.patch("/{exp_id}/star-data")
-def update_star_data(
+@router.patch("/{exp_id}/detail")
+def update_detail(
     exp_id: int,
-    req: StarDataUpdateRequest,
+    req: DetailUpdateRequest,
     x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
     db: Session = Depends(get_db)
 ):
     """
-    특정 경험 항목의 STAR 데이터를 업데이트합니다.
+    특정 경험 항목의 상세 내용(detail)을 업데이트합니다.
     """
     if not x_user_id:
         test_user = db.query(User).filter(User.email == "dbeaver_test@careerai.com").first()
@@ -298,9 +291,10 @@ def update_star_data(
         raise HTTPException(status_code=404, detail="해당 경험 항목을 찾을 수 없습니다.")
 
     try:
-        exp.star_data = req.star_data
+        exp.detail = req.detail
+        exp.description = req.detail
         db.commit()
-        return {"status": "success", "message": "STAR 데이터가 저장되었습니다."}
+        return {"status": "success", "message": "경험 상세 내용이 저장되었습니다."}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"저장 중 오류가 발생했습니다: {str(e)}")

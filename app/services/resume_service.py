@@ -137,25 +137,22 @@ def match_experiences(question: str, experiences: list) -> dict:
 
     exp_lines = []
     for exp in experiences:
-        star = exp.get("starData") or {}
-        has_star = bool(star and any(star.get(k, "").strip() for k in ("S", "T", "A", "R")))
-        if has_star:
-            parts = [f"S: {star.get('S','')}", f"T: {star.get('T','')}", f"A: {star.get('A','')}", f"R: {star.get('R','')}"]
-            star_text = "\n  " + "\n  ".join(p for p in parts if p.split(": ", 1)[1])
+        detail = (exp.get("detail") or "").strip()
+        if detail:
+            detail_text = f"\n  내용: {detail[:300]}" if len(detail) <= 300 else f"\n  내용: {detail[:300]}..."
             detail_note = ""
         else:
-            star_text = ""
+            detail_text = ""
             detail_note = " [세부 내용 없음 — 이름만 등록된 경험]"
         exp_lines.append(
-            f"[ID: {exp['id']}] {exp.get('company','')} / {exp.get('role','')} "
-            f"| 기술: {', '.join(exp.get('tags', []))}{detail_note}{star_text}"
+            f"[ID: {exp['id']}] {exp.get('company','')} / {exp.get('role','')}{detail_note}{detail_text}"
         )
 
     prompt = f"""자소서 문항에 대해 각 경험의 매칭율(0-100 정수)을 평가해주세요.
 매칭율은 해당 경험이 이 문항을 답변하는 데 얼마나 적합한지를 나타냅니다.
 
 평가 기준:
-- STAR 세부 내용이 있는 경험: 문항과의 실제 연관성을 바탕으로 0-100 범위에서 평가
+- 세부 내용이 있는 경험: 문항과의 실제 연관성을 바탕으로 0-100 범위에서 평가
 - "[세부 내용 없음]" 표시 경험: 이름만으로는 판단 불가이므로 반드시 20 이하로 평가
 
 [자소서 문항]
@@ -184,15 +181,28 @@ def match_experiences(question: str, experiences: list) -> dict:
 
 # ── Resume DB CRUD (ERD 기준) ──────────────────────────────────────
 
+def create_resume(db: Session, user_id: int, company_name: str, job_title: str) -> dict:
+    """자소서 세션마다 새로운 resumes 행을 생성한다."""
+    resume = Resume(
+        user_id=user_id,
+        title=f"{company_name} {job_title} 자기소개서",
+        parsed_content={"company_name": company_name, "job_title": job_title, "questions": []},
+    )
+    db.add(resume)
+    db.commit()
+    db.refresh(resume)
+    print(f"[create_resume] 새 resume 생성: id={resume.id}")
+    return {"resume_id": resume.id}
+
+
 def _find_or_create_resume(db: Session, user_id: int, company_name: str, job_title: str) -> Resume:
-    """company_name + job_title 기준으로 resumes 행을 찾거나 생성한다.
-    동시 저장으로 중복 생성된 경우 id가 가장 작은(가장 오래된) resume을 반환한다."""
-    resumes = db.query(Resume).filter(Resume.user_id == user_id).order_by(Resume.id).all()
+    """company_name + job_title 기준으로 resumes 행을 찾거나 생성한다. (기존 세션 로드용)"""
+    resumes = db.query(Resume).filter(Resume.user_id == user_id).order_by(Resume.id.desc()).all()
     matched = [r for r in resumes
                if (r.parsed_content or {}).get("company_name") == company_name
                and (r.parsed_content or {}).get("job_title") == job_title]
     if matched:
-        return matched[0]  # 중복 시 가장 오래된 것 반환
+        return matched[0]
     resume = Resume(
         user_id=user_id,
         title=f"{company_name} {job_title} 자기소개서",
@@ -203,19 +213,24 @@ def _find_or_create_resume(db: Session, user_id: int, company_name: str, job_tit
     return resume
 
 
-def get_drafts(db: Session, user_id: int, company_name: str, job_title: str) -> list:
-    """해당 기업/직무의 자소서 문항 목록과 평가 결과를 반환한다."""
-    resumes = db.query(Resume).filter(Resume.user_id == user_id).all()
-    resume = next(
-        (r for r in resumes
-         if (r.parsed_content or {}).get("company_name") == company_name
-         and (r.parsed_content or {}).get("job_title") == job_title),
-        None,
-    )
+def get_drafts(db: Session, user_id: int, company_name: str, job_title: str,
+               resume_id: int = None) -> dict:
+    """해당 resume_id(또는 최신 기업/직무)의 자소서 문항 목록과 평가 결과를 반환한다."""
+    if resume_id:
+        resume = db.query(Resume).filter(
+            Resume.id == resume_id, Resume.user_id == user_id
+        ).first()
+    else:
+        resumes = db.query(Resume).filter(Resume.user_id == user_id).order_by(Resume.id.desc()).all()
+        resume = next(
+            (r for r in resumes
+             if (r.parsed_content or {}).get("company_name") == company_name
+             and (r.parsed_content or {}).get("job_title") == job_title),
+            None,
+        )
     if not resume:
-        return []
+        return {"resume_id": None, "drafts": []}
 
-    # parsed_content.questions를 fallback으로 유지하되 rq.question_text 우선 사용
     question_texts = (resume.parsed_content or {}).get("questions", [])
     result = []
     for rq in sorted(resume.resume_questions, key=lambda x: x.question_number):
@@ -230,33 +245,46 @@ def get_drafts(db: Session, user_id: int, company_name: str, job_title: str) -> 
             "ai_feedback": latest_eval.feedback or "" if latest_eval else "",
             "updated_at": rq.updated_at.isoformat() if rq.updated_at else None,
         })
-    return result
+    return {"resume_id": resume.id, "drafts": result}
 
 
 def save_draft(db: Session, user_id: int, company_name: str, job_title: str,
                question_text: str, draft_content: str,
-               ai_score: float = None, ai_feedback: str = None) -> dict:
-    """완성된 문항별 자소서를 저장한다."""
+               ai_score: float = None, ai_feedback: str = None,
+               resume_id: int = None) -> dict:
+    """완성된 문항별 자소서를 저장한다. resume_id가 주어지면 해당 resume를 직접 사용한다."""
     draft_content = draft_content or ""
 
-    resume = _find_or_create_resume(db, user_id, company_name, job_title)
+    if resume_id:
+        resume = db.query(Resume).filter(Resume.id == resume_id).first()
+        if not resume:
+            raise ValueError(f"Resume id={resume_id} not found")
+    else:
+        resume = _find_or_create_resume(db, user_id, company_name, job_title)
 
     # 질문 목록 동기화
-    questions: list = list(resume.parsed_content.get("questions", []))
+    parsed = resume.parsed_content or {"company_name": company_name, "job_title": job_title, "questions": []}
+    questions: list = list(parsed.get("questions", []))
     if question_text not in questions:
         questions.append(question_text)
-        resume.parsed_content = {**resume.parsed_content, "questions": questions}
+        resume.parsed_content = {**parsed, "questions": questions}
 
     question_number = questions.index(question_text) + 1
 
-    # resume_questions upsert — ORM 캐시 우회해 직접 쿼리
+    # resume_questions upsert — question_text 우선, question_number 보조 조회
     rq = db.query(ResumeQuestion).filter(
         ResumeQuestion.resume_id == resume.id,
-        ResumeQuestion.question_number == question_number,
+        ResumeQuestion.question_text == question_text,
     ).first()
+    if not rq:
+        rq = db.query(ResumeQuestion).filter(
+            ResumeQuestion.resume_id == resume.id,
+            ResumeQuestion.question_number == question_number,
+        ).first()
     if rq:
         rq.question_text = question_text
         rq.question_content = draft_content
+        rq.question_number = question_number
         rq.user_id = user_id
     else:
         rq = ResumeQuestion(
@@ -300,6 +328,7 @@ def save_draft(db: Session, user_id: int, company_name: str, job_title: str,
 
     db.commit()
     db.refresh(rq)
+    print(f"[save_draft] 커밋 완료 — rq.id={rq.id}, question_content 길이={len(rq.question_content or '')}, ai_score={ai_score}")
     return {
         "id": rq.id,
         "question_text": question_text,
@@ -311,9 +340,14 @@ def save_draft(db: Session, user_id: int, company_name: str, job_title: str,
 
 
 def save_overall_evaluation(db: Session, user_id: int, company_name: str, job_title: str,
-                            overall_feedback: str) -> dict:
+                            overall_feedback: str, resume_id: int = None) -> dict:
     """전체 피드백 결과를 resume_evaluations 테이블에 저장한다."""
-    resume = _find_or_create_resume(db, user_id, company_name, job_title)
+    if resume_id:
+        resume = db.query(Resume).filter(Resume.id == resume_id).first()
+        if not resume:
+            raise ValueError(f"Resume id={resume_id} not found")
+    else:
+        resume = _find_or_create_resume(db, user_id, company_name, job_title)
     eval_row = ResumeEvaluation(
         resume_id=resume.id,
         overall_feedback=overall_feedback,

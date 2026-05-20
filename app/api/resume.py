@@ -181,13 +181,14 @@ class OverallEvaluationSaveRequest(BaseModel):
     company_name: str
     job_title: str
     overall_feedback: str
+    resume_id: Optional[int] = None
 
 
 @router.post("/evaluations/save")
 def evaluation_save(req: OverallEvaluationSaveRequest, db: Session = Depends(get_db)):
     try:
         result = resume_service.save_overall_evaluation(
-            db, req.user_id, req.company_name, req.job_title, req.overall_feedback
+            db, req.user_id, req.company_name, req.job_title, req.overall_feedback, req.resume_id
         )
         return {"status": "success", "evaluation": result}
     except Exception as e:
@@ -235,6 +236,21 @@ def jd_info(user_id: int, company_name: str, job_role: str, db: Session = Depend
 
 # ── Cover letter draft DB CRUD ──────────────────────────────────────
 
+class ResumeCreateRequest(BaseModel):
+    user_id: int
+    company_name: str
+    job_title: str
+
+
+@router.post("/create")
+def resume_create(req: ResumeCreateRequest, db: Session = Depends(get_db)):
+    try:
+        result = resume_service.create_resume(db, req.user_id, req.company_name, req.job_title)
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class DraftSaveRequest(BaseModel):
     user_id: int
     company_name: str
@@ -243,6 +259,7 @@ class DraftSaveRequest(BaseModel):
     draft_content: str
     ai_score: Optional[float] = None
     ai_feedback: Optional[str] = None
+    resume_id: Optional[int] = None
 
 
 class DraftDeleteRequest(BaseModel):
@@ -261,6 +278,7 @@ def draft_save(req: DraftSaveRequest, db: Session = Depends(get_db)):
             draft_content=req.draft_content,
             ai_score=req.ai_score,
             ai_feedback=req.ai_feedback,
+            resume_id=req.resume_id,
         )
         return {"status": "success", "draft": result}
     except Exception as e:
@@ -268,10 +286,11 @@ def draft_save(req: DraftSaveRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/drafts")
-def draft_list(user_id: int, company_name: str, job_title: str, db: Session = Depends(get_db)):
+def draft_list(user_id: int, company_name: str, job_title: str,
+               resume_id: Optional[int] = None, db: Session = Depends(get_db)):
     try:
-        drafts = resume_service.get_drafts(db, user_id, company_name, job_title)
-        return {"status": "success", "drafts": drafts}
+        result = resume_service.get_drafts(db, user_id, company_name, job_title, resume_id)
+        return {"status": "success", **result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
