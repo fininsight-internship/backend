@@ -3,6 +3,7 @@ import os
 import json
 import re
 import uuid
+import hashlib
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
@@ -12,19 +13,15 @@ from openai import OpenAI
 import anthropic
 from google import genai as google_genai
 from sqlalchemy.orm import Session
-from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.core.auth import get_current_user
-from app.models.db_models import User, InterviewSession, InterviewQuestion, FollowUpQuestion
-
-from app.core.db import get_db
-from app.models.db_models import User, InterviewSession, InterviewQuestion, FollowUpQuestion
+from app.models.db_models import User, InterviewSession, InterviewQuestion, FollowUpQuestion, CompanyJDAnalysis, Resume, InterviewEvaluationAxisCache
 from app.services.interview_rag_data import (
     FEATURE_TAXONOMY,
     AVAILABLE_POSITIONS,
     compute_feature_weights,
     retrieve_context,
+    tag_features,
 )
 
 load_dotenv()
@@ -92,6 +89,8 @@ class QuestionRequest(BaseModel):
     job_role: str
     interview_type: Optional[str] = "전체"
     axis_type: Optional[str] = "static"
+    analysis_id: Optional[int] = None
+    resume_id: Optional[int] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -100,6 +99,8 @@ class FeedbackRequest(BaseModel):
     question: str
     user_answer: str
     feature_weights: Optional[Dict[str, float]] = None
+    analysis_id: Optional[int] = None
+    resume_id: Optional[int] = None
 
 
 class FollowUpRequest(BaseModel):
@@ -107,6 +108,9 @@ class FollowUpRequest(BaseModel):
     job_role: str
     question: str
     user_answer: str
+    resume_excerpt: Optional[str] = None
+    analysis_id: Optional[int] = None
+    resume_id: Optional[int] = None
 class FollowUpFeedbackRequest(BaseModel):
     company: str
     job_role: str
@@ -200,34 +204,185 @@ def _extract_json(raw: str) -> Any:
     return json.loads(cleaned)
 
 
-# ─────────────────────────────────────────────────────────────
-# 엔드포인트 1: 지원 가능한 포지션 목록
-# ─────────────────────────────────────────────────────────────
-@router.get("/positions")
-def get_positions():
-    """
-    서비스 내에서 분석된 기업-직무 포지션 목록 반환.
-    (PoC: KoDATA 1건 하드코딩)
-    """
-    return AVAILABLE_POSITIONS
+def _compact_json(data: Any) -> str:
+    """프롬프트 컨텍스트용으로 JSON 데이터를 짧고 안정적으로 직렬화합니다."""
+    if not data:
+        return ""
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-# ─────────────────────────────────────────────────────────────
-# 엔드포인트 2: 평가축 추론 (feature weights)
-# ─────────────────────────────────────────────────────────────
-@router.post("/evaluate-axes")
-def evaluate_axes(req: QuestionRequest):
-    """
-    JD + 기업분석 레포트 + 자소서 문서를 RAG로 retrieval하여
-    평가축별 weight를 계산하고 반환합니다.
-    (평가축은 고정 taxonomy — weight만 동적 계산)
-    """
-    weights = compute_feature_weights(req.company, req.job_role)
-    ctx = retrieve_context(req.company, req.job_role)
+def _serialize_analysis(row: CompanyJDAnalysis) -> dict:
+    report = row.analysis_report or {}
+    return {
+        "id": row.id,
+        "company_name": row.company_name,
+        "job_role": row.job_role,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "company_analysis": report.get("company_analysis", {}),
+        "job_analysis": report.get("job_analysis", {}),
+        "fit_analysis": report.get("fit_analysis", {}),
+        "document_optimization": report.get("document_optimization", {}),
+    }
 
-    # weight 기반 평가축 목록 (name + description + score 포함)
+
+def _analysis_signature(row: CompanyJDAnalysis, axis_type: str) -> str:
+    report = row.analysis_report or {}
+    payload = {
+        "axis_type": axis_type,
+        "company_name": row.company_name,
+        "job_role": row.job_role,
+        "jd_content": row.jd_content or "",
+        "company_analysis": report.get("company_analysis", {}),
+        "job_analysis": report.get("job_analysis", {}),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _serialize_resume(row: Resume) -> dict:
+    parsed = row.parsed_content or {}
+    questions = []
+    for q in sorted(row.resume_questions, key=lambda x: x.question_number):
+        questions.append({
+            "id": q.id,
+            "question_text": q.question_text or "",
+            "draft_content": q.question_content or "",
+        })
+
+    return {
+        "id": row.id,
+        "title": row.title,
+        "company_name": parsed.get("company_name") or "",
+        "job_role": parsed.get("job_title") or "",
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "raw_content": row.raw_content or "",
+        "questions": questions,
+    }
+
+
+def _resume_to_text(row: Resume) -> str:
+    data = _serialize_resume(row)
+    if data["raw_content"]:
+        return data["raw_content"]
+    parts = []
+    for idx, q in enumerate(data["questions"], start=1):
+        if q["question_text"] or q["draft_content"]:
+            parts.append(f"[문항 {idx}] {q['question_text']}\n{q['draft_content']}")
+    return "\n\n".join(parts)
+
+
+def _compute_weights_from_context(ctx: dict, include_resume: bool = False) -> Dict[str, float]:
+    weighted_sources = [
+        (ctx.get("jd", ""), 1.0),
+        (ctx.get("company_analysis", ""), 0.95),
+    ]
+    if include_resume:
+        weighted_sources.append((ctx.get("resume", ""), 1.0))
+    aggregated: Dict[str, float] = {}
+    for text, trust in weighted_sources:
+        for key, count in tag_features(text).items():
+            aggregated[key] = aggregated.get(key, 0) + count * trust
+
+    if not aggregated:
+        return {}
+    max_val = max(aggregated.values())
+    if max_val == 0:
+        return {}
+    return {k: round(v / max_val, 3) for k, v in sorted(aggregated.items(), key=lambda x: -x[1])}
+
+
+def _build_db_context(
+    db: Session,
+    current_user: User,
+    company: str,
+    job_role: str,
+    analysis_id: Optional[int] = None,
+    resume_id: Optional[int] = None,
+) -> dict:
+    """
+    선택된 JD/기업분석과 자소서를 DB에서 읽어 면접 RAG 컨텍스트로 구성합니다.
+    선택값이 없으면 기존 mock RAG 컨텍스트를 폴백으로 유지합니다.
+    """
+    ctx = {
+        "jd": "",
+        "company_analysis": "",
+        "resume": "",
+        "all_combined": "",
+        "sources": [],
+    }
+
+    analysis = None
+    if analysis_id:
+        analysis = db.query(CompanyJDAnalysis).filter(
+            CompanyJDAnalysis.id == analysis_id,
+            CompanyJDAnalysis.user_id == current_user.id,
+        ).first()
+        if not analysis:
+            raise HTTPException(status_code=404, detail="선택한 JD/기업분석 데이터를 찾을 수 없습니다.")
+
+    resume = None
+    if resume_id:
+        resume = db.query(Resume).filter(
+            Resume.id == resume_id,
+            Resume.user_id == current_user.id,
+        ).first()
+        if not resume:
+            raise HTTPException(status_code=404, detail="선택한 자소서 데이터를 찾을 수 없습니다.")
+
+    if analysis:
+        report = analysis.analysis_report or {}
+        ctx["jd"] = analysis.jd_content or ""
+        ctx["company_analysis"] = "\n\n".join([
+            "[기업 분석]",
+            _compact_json(report.get("company_analysis", {})),
+            "[JD 분석]",
+            _compact_json(report.get("job_analysis", {})),
+            "[적합도 분석]",
+            _compact_json(report.get("fit_analysis", {})),
+            "[문서 최적화]",
+            _compact_json(report.get("document_optimization", {})),
+        ]).strip()
+        ctx["sources"].append({
+            "id": f"analysis-{analysis.id}",
+            "label": f"JD/기업분석: {analysis.company_name} · {analysis.job_role}",
+        })
+
+    if resume:
+        ctx["resume"] = _resume_to_text(resume)
+        ctx["sources"].append({
+            "id": f"resume-{resume.id}",
+            "label": f"자소서: {resume.title}",
+        })
+
+    if not analysis and not resume:
+        return retrieve_context(company, job_role)
+
+    ctx["all_combined"] = "\n\n---\n\n".join(
+        part for part in [
+            f"[채용공고]\n{ctx['jd']}" if ctx["jd"] else "",
+            f"[기업/JD 분석]\n{ctx['company_analysis']}" if ctx["company_analysis"] else "",
+            f"[자기소개서]\n{ctx['resume']}" if ctx["resume"] else "",
+        ] if part
+    )
+    return ctx
+
+
+def _get_required_analysis(db: Session, current_user: User, analysis_id: Optional[int]) -> CompanyJDAnalysis:
+    if not analysis_id:
+        raise HTTPException(status_code=400, detail="면접 질문 생성을 위해 JD/기업분석 선택이 필요합니다.")
+    analysis = db.query(CompanyJDAnalysis).filter(
+        CompanyJDAnalysis.id == analysis_id,
+        CompanyJDAnalysis.user_id == current_user.id,
+    ).first()
+    if not analysis:
+        raise HTTPException(status_code=404, detail="선택한 JD/기업분석 데이터를 찾을 수 없습니다.")
+    return analysis
+
+
+def _static_axes_from_weights(weights: Dict[str, float]) -> List[dict]:
     axes = []
-    for key, score in weights.items():
+    for key, score in list(weights.items())[:6]:
         if key in FEATURE_TAXONOMY:
             axes.append({
                 "key": key,
@@ -235,39 +390,43 @@ def evaluate_axes(req: QuestionRequest):
                 "description": FEATURE_TAXONOMY[key]["description"],
                 "weight": score,
             })
-
-    return {
-        "company": req.company,
-        "job_role": req.job_role,
-        "evaluation_axes": axes,
-        "sources": ctx["sources"],
-        "note": "평가축은 JD·기업분석·자소서 데이터 기반 추론 결과입니다. 실제 기업 내부 평가 기준과 다를 수 있습니다.",
-    }
+    return axes
 
 
-# ─────────────────────────────────────────────────────────────
-# 엔드포인트 3: 면접 질문 생성 (RAG + 평가축 기반)
-# ─────────────────────────────────────────────────────────────
-@router.post("/questions")
-def get_interview_questions(req: QuestionRequest):
+def _get_cached_or_create_axes(
+    db: Session,
+    analysis: CompanyJDAnalysis,
+    ctx: dict,
+    axis_type: str,
+) -> tuple[Dict[str, float], List[dict], Dict[str, str]]:
     """
-    RAG로 JD + 기업분석 + 자소서를 retrieval하고,
-    평가축 weight 또는 동적 평가축 기반으로 맞춤형 면접 질문 5개를 생성합니다.
+    평가축은 JD/기업분석만 사용해 산출하고 source signature 기준으로 캐시합니다.
+    자소서는 질문 내용 생성에는 쓰지만 평가 기준 산출에는 절대 쓰지 않습니다.
     """
-    # 1) RAG retrieval
-    ctx = retrieve_context(req.company, req.job_role)
-    weights = compute_feature_weights(req.company, req.job_role)
+    normalized_axis_type = axis_type if axis_type in {"static", "dynamic"} else "static"
+    signature = _analysis_signature(analysis, normalized_axis_type)
+    cached = db.query(InterviewEvaluationAxisCache).filter(
+        InterviewEvaluationAxisCache.source_signature == signature
+    ).first()
+    if cached:
+        axes = cached.axes or []
+        weights = cached.feature_weights or {ax.get("key"): ax.get("weight", 0) for ax in axes}
+        dynamic_map = {ax.get("key"): ax.get("name") for ax in axes if ax.get("key") and ax.get("name")}
+        return weights, axes, dynamic_map
 
-    # 2) 평가축 설정 (정적 vs 동적)
-    dynamic_axis_map = {}
-    axes_used_info = []
-    
-    if req.axis_type == "dynamic":
+    weights = _compute_weights_from_context(ctx, include_resume=False) or compute_feature_weights(
+        analysis.company_name,
+        analysis.job_role,
+    )
+    dynamic_map: Dict[str, str] = {}
+
+    if normalized_axis_type == "dynamic":
         axes_prompt = f"""
-당신은 기업 면접관입니다. 아래 데이터를 바탕으로 해당 직무에 필요한 핵심 평가축(역량) 6가지를 동적으로 추출하세요.
+당신은 기업 면접관입니다. 아래 JD와 기업분석 데이터를 바탕으로 해당 직무에 필요한 핵심 평가축(역량) 6가지를 동적으로 추출하세요.
+평가축은 지원자 개인 자소서가 아니라 채용공고와 기업/직무 분석 기준에서만 도출해야 합니다.
 
-[지원 기업] {req.company}
-[지원 직무] {req.job_role}
+[지원 기업] {analysis.company_name}
+[지원 직무] {analysis.job_role}
 [채용공고 핵심 요약] {ctx['jd']}
 [기업 분석 레포트 요약] {ctx['company_analysis']}
 
@@ -288,29 +447,122 @@ def get_interview_questions(req: QuestionRequest):
             except Exception as claude_err:
                 print(f"⚠️ Claude 동적 평가축 생성 실패, GPT로 폴백: {claude_err}")
                 raw_axes = _call_openai(axes_prompt, max_tokens=1000, temperature=0.7)
-            dynamic_axes = _extract_json(raw_axes)
-            axes_desc = "\n".join([f"- {ax['name']}: {ax['description']}" for ax in dynamic_axes])
-            weights = {ax['key']: ax['weight'] for ax in dynamic_axes}
-            dynamic_axis_map = {ax['key']: ax['name'] for ax in dynamic_axes}
-            axes_used_info = dynamic_axes
+            axes = _extract_json(raw_axes)
+            weights = {ax["key"]: ax.get("weight", 1.0) for ax in axes}
+            dynamic_map = {ax["key"]: ax["name"] for ax in axes}
         except Exception as e:
-            print("동적 평가축 추출 실패, 기본값 사용:", e)
-            req.axis_type = "static"
+            print("동적 평가축 추출 실패, 정적 평가축으로 폴백:", e)
+            axes = _static_axes_from_weights(weights)
+            dynamic_map = {ax["key"]: ax["name"] for ax in axes}
+    else:
+        axes = _static_axes_from_weights(weights)
+        dynamic_map = {ax["key"]: ax["name"] for ax in axes}
 
-    if req.axis_type == "static":
-        top_axes = list(weights.items())[:6]
-        axes_desc = "\n".join(
-            [f"- {FEATURE_TAXONOMY[k]['name']} (weight: {v}): {FEATURE_TAXONOMY[k]['description']}"
-             for k, v in top_axes if k in FEATURE_TAXONOMY]
-        )
-        for k, v in top_axes:
-            if k in FEATURE_TAXONOMY:
-                axes_used_info.append({
-                    "key": k,
-                    "name": FEATURE_TAXONOMY[k]['name'],
-                    "description": FEATURE_TAXONOMY[k]['description'],
-                    "weight": v
-                })
+    cache = InterviewEvaluationAxisCache(
+        source_signature=signature,
+        company_name=analysis.company_name,
+        job_role=analysis.job_role,
+        axis_type=normalized_axis_type,
+        axes=axes,
+        feature_weights=weights,
+    )
+    db.add(cache)
+    db.commit()
+
+    return weights, axes, dynamic_map
+
+
+# ─────────────────────────────────────────────────────────────
+# 엔드포인트 1: 지원 가능한 포지션 목록
+# ─────────────────────────────────────────────────────────────
+@router.get("/positions")
+def get_positions():
+    """
+    서비스 내에서 분석된 기업-직무 포지션 목록 반환.
+    (PoC: KoDATA 1건 하드코딩)
+    """
+    return AVAILABLE_POSITIONS
+
+
+@router.get("/sources")
+def get_interview_sources(
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+):
+    """면접 질문 생성에 사용할 DB 저장 JD/기업분석 목록과 자소서 목록을 반환합니다."""
+    current_user = get_current_user(db, x_user_id, x_user_email)
+
+    analyses = db.query(CompanyJDAnalysis).filter(
+        CompanyJDAnalysis.user_id == current_user.id
+    ).order_by(CompanyJDAnalysis.created_at.desc()).all()
+
+    resumes = db.query(Resume).filter(
+        Resume.user_id == current_user.id
+    ).order_by(Resume.updated_at.desc(), Resume.created_at.desc()).all()
+
+    return {
+        "analyses": [_serialize_analysis(item) for item in analyses],
+        "resumes": [_serialize_resume(item) for item in resumes],
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 엔드포인트 2: 평가축 추론 (feature weights)
+# ─────────────────────────────────────────────────────────────
+@router.post("/evaluate-axes")
+def evaluate_axes(
+    req: QuestionRequest,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+):
+    """
+    JD + 기업분석 레포트만 기준으로 평가축을 계산하고 캐시된 결과를 반환합니다.
+    자소서는 질문 내용에는 활용될 수 있지만 평가축 산출 기준에서는 제외됩니다.
+    """
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    analysis = _get_required_analysis(db, current_user, req.analysis_id)
+    ctx = _build_db_context(db, current_user, analysis.company_name, analysis.job_role, req.analysis_id, None)
+    weights, axes, _ = _get_cached_or_create_axes(db, analysis, ctx, req.axis_type or "static")
+
+    return {
+        "company": analysis.company_name,
+        "job_role": analysis.job_role,
+        "evaluation_axes": axes,
+        "sources": ctx["sources"],
+        "feature_weights": weights,
+        "note": "평가축은 JD·기업분석 데이터 기반 추론 결과이며 캐시되어 동일 분석 기준에서 재사용됩니다. 자소서는 평가축 산출에 포함하지 않습니다.",
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 엔드포인트 3: 면접 질문 생성 (RAG + 평가축 기반)
+# ─────────────────────────────────────────────────────────────
+@router.post("/questions")
+def get_interview_questions(
+    req: QuestionRequest,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+):
+    """
+    RAG로 JD + 기업분석 + 자소서를 retrieval하고,
+    평가축 weight 또는 동적 평가축 기반으로 맞춤형 면접 질문 5개를 생성합니다.
+    """
+    # 1) RAG retrieval
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    analysis = _get_required_analysis(db, current_user, req.analysis_id)
+    ctx = _build_db_context(db, current_user, analysis.company_name, analysis.job_role, req.analysis_id, req.resume_id)
+    weights, axes_used_info, dynamic_axis_map = _get_cached_or_create_axes(
+        db,
+        analysis,
+        ctx,
+        req.axis_type or "static",
+    )
+    axes_desc = "\n".join(
+        [f"- {ax.get('name')}: {ax.get('description')} (weight: {ax.get('weight', 0)})" for ax in axes_used_info]
+    )
                 
     # 3) 면접 유형에 따른 조건 추가
     type_condition = ""
@@ -324,8 +576,8 @@ def get_interview_questions(req: QuestionRequest):
     prompt = f"""
 당신은 기업 면접관입니다. 아래 데이터를 참조하여 지원자에게 할 면접 질문을 생성하세요.
 
-[지원 기업] {req.company}
-[지원 직무] {req.job_role}
+[지원 기업] {analysis.company_name}
+[지원 직무] {analysis.job_role}
 
 [RAG 기반 검색 결과 - 채용공고 핵심 요약]
 {ctx['jd']}
@@ -342,8 +594,8 @@ def get_interview_questions(req: QuestionRequest):
 위 데이터를 반드시 참조하여, 아래 조건에 맞게 면접 질문 5개를 생성하세요:
 
 조건:
-1. 자소서에서 언급된 구체적 경험을 직접 검증하는 질문 포함
-2. 제시된 핵심 평가축 중심으로 질문 강화
+1. 선택된 자소서가 있으면 자소서에서 언급된 구체적 경험을 직접 검증하는 질문을 포함하세요. 자소서가 비어 있으면 JD/기업분석 기반 질문으로 구성하세요.
+2. 제시된 핵심 평가축 중심으로 질문을 강화하되, 평가축 자체는 JD/기업분석 기준으로만 해석하세요.
 {type_condition}
 4. 이 직무의 약점으로 분석된 지식 검증 질문 1개 이상 포함
 5. evaluation_axis 필드에 해당 질문이 검증하는 평가축 key를 명시
@@ -379,14 +631,14 @@ def get_interview_questions(req: QuestionRequest):
             axis_key = item.get("evaluation_axis", "")
             
             matched = False
-            # 1) 동적 평가축 매칭 시도 (key 또는 name 매칭)
-            if req.axis_type == "dynamic":
-                for ax in dynamic_axes:
-                    if ax.get("key") == axis_key or ax.get("name") == axis_key:
-                        item["axis_name"] = ax.get("name")
-                        item["axis_weight"] = ax.get("weight", 0.0)
-                        matched = True
-                        break
+            # 1) 캐시된 평가축 매칭 시도 (key 또는 name 매칭)
+            for ax in axes_used_info:
+                if ax.get("key") == axis_key or ax.get("name") == axis_key:
+                    item["axis_name"] = ax.get("name")
+                    item["axis_weight"] = ax.get("weight", 0.0)
+                    item["evaluation_axis"] = ax.get("key", axis_key)
+                    matched = True
+                    break
             
             # 2) 정적/기본 평가축 매칭 시도
             if not matched:
@@ -454,13 +706,19 @@ def get_follow_up_feedback(req: FollowUpFeedbackRequest):
 # 엔드포인트 4: 답변 평가 + 감점 리스크 분석
 # ─────────────────────────────────────────────────────────────
 @router.post("/feedback")
-def get_answer_feedback(req: FeedbackRequest):
+def get_answer_feedback(
+    req: FeedbackRequest,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+):
     """
     지원자 답변을 평가축 기준으로 분석하여
     강점, 감점 리스크, 개선 방향을 제공합니다.
     """
-    ctx = retrieve_context(req.company, req.job_role)
-    weights = req.feature_weights or compute_feature_weights(req.company, req.job_role)
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    ctx = _build_db_context(db, current_user, req.company, req.job_role, req.analysis_id, req.resume_id)
+    weights = req.feature_weights or _compute_weights_from_context(ctx) or compute_feature_weights(req.company, req.job_role)
 
     top_axes = list(weights.items())[:4]
     axes_desc = "\n".join(
@@ -518,12 +776,18 @@ def get_answer_feedback(req: FeedbackRequest):
 # 엔드포인트 5: 압박 꼬리질문 생성
 # ─────────────────────────────────────────────────────────────
 @router.post("/follow-up")
-def get_follow_up_question(req: FollowUpRequest):
+def get_follow_up_question(
+    req: FollowUpRequest,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+):
     """
     지원자 답변의 논리적 허점이나 자소서와의 불일치를
     파고드는 압박 꼬리질문을 생성합니다.
     """
-    ctx = retrieve_context(req.company, req.job_role)
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    ctx = _build_db_context(db, current_user, req.company, req.job_role, req.analysis_id, req.resume_id)
     resume_ref = req.resume_excerpt or ctx["resume"][:500]
 
     prompt = f"""

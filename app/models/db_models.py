@@ -122,6 +122,20 @@ class CompanyJDAnalysis(Base):
     user = relationship("User", back_populates="company_analyses")
 
 
+class InterviewEvaluationAxisCache(Base):
+    __tablename__ = "interview_evaluation_axis_cache"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_signature = Column(String(128), unique=True, nullable=False, index=True)
+    company_name = Column(String(255), nullable=False)
+    job_role = Column(String(255), nullable=False)
+    axis_type = Column(String(50), nullable=False)
+    axes = Column(JSON, nullable=False)
+    feature_weights = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class InterviewSession(Base):
     __tablename__ = "interview_sessions"
     
