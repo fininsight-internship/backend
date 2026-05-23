@@ -123,6 +123,9 @@ class FollowUpRequest(BaseModel):
     resume_excerpt: Optional[str] = None
     analysis_id: Optional[int] = None
     resume_id: Optional[int] = None
+    existing_follow_ups: Optional[List[str]] = None
+
+
 class FollowUpFeedbackRequest(BaseModel):
     company: str
     job_role: str
@@ -1048,21 +1051,27 @@ def get_follow_up_question(
     current_user = get_current_user(db, x_user_id, x_user_email)
     ctx = _build_db_context(db, current_user, req.company, req.job_role, req.analysis_id, req.resume_id)
     resume_ref = req.resume_excerpt or ctx["resume"][:500]
+    existing_follow_ups = req.existing_follow_ups or []
+    existing_block = "\n".join(f"- {q}" for q in existing_follow_ups[:8]) if existing_follow_ups else "없음"
 
     prompt = f"""
-당신은 날카로운 면접관입니다. 지원자의 답변을 듣고 자소서와의 일관성,
-논리적 허점, 구체성 부족 등을 파고드는 압박 꼬리질문을 생성하세요.
+당신은 날카로운 면접관입니다. 아래 지원자 답변을 가장 중요한 근거로 삼아,
+답변 안의 논리적 허점, 구체성 부족, 검증이 필요한 주장, 성과의 실제 기여도를 파고드는 꼬리질문을 생성하세요.
+자소서는 보조 참고자료로만 활용하고, 답변에 없는 내용을 억지로 끌어오지 마세요.
 
 [면접 질문] {req.question}
 [지원자 답변] {req.user_answer}
 [자소서 참조] {resume_ref}
 [지원 직무] {req.job_role} @ {req.company}
+[이미 생성된 꼬리질문]
+{existing_block}
 
 꼬리질문 조건:
-1. 답변의 가장 약한 논리 지점을 파고들 것
-2. 자소서에서 강조한 내용과 답변 간 불일치가 있으면 검증할 것
-3. "그렇다면..." "구체적으로..." "왜..." 형태로 시작하는 날카로운 질문
-4. 2~3개 생성
+1. 지원자 답변에서 실제로 언급한 내용에 기반할 것
+2. 답변의 가장 약한 논리 지점 또는 가장 검증이 필요한 주장 하나만 파고들 것
+3. 이미 생성된 꼬리질문과 같은 관점이나 표현을 반복하지 말 것
+4. "그렇다면..." "구체적으로..." "왜..." 형태로 시작하는 자연스러운 질문
+5. 정확히 1개만 생성
 
 반드시 JSON 배열만 출력하세요.
 
@@ -1083,7 +1092,9 @@ def get_follow_up_question(
             print(f"⚠️ Gemini 실패, GPT로 폴백: {gem_err}")
             raw = _call_openai(prompt, max_tokens=600, temperature=0.8)
         result = _extract_json(raw)
-        return {"follow_up_questions": result}
+        if isinstance(result, list):
+            return {"follow_up_questions": result[:1]}
+        return {"follow_up_questions": [result]}
     except Exception as e:
         print("❌ 꼬리질문 에러:", e)
         raise HTTPException(status_code=500, detail=f"꼬리질문 생성 실패: {str(e)}")
@@ -1309,6 +1320,49 @@ def delete_interview_question(
     return {"message": "질문이 삭제되었습니다."}
 
 
+@router.delete("/sessions/{session_id}/questions/{question_id}/follow-ups/{follow_up_id}")
+def delete_follow_up_question(
+    session_id: str,
+    question_id: str,
+    follow_up_id: int,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None)
+):
+    """저장된 면접 세션에서 특정 꼬리질문을 삭제합니다."""
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    session = db.query(InterviewSession).filter(
+        InterviewSession.id == session_id,
+        InterviewSession.user_id == current_user.id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="면접 세션을 찾을 수 없습니다.")
+
+    question = db.query(InterviewQuestion).filter(
+        InterviewQuestion.session_id == session_id,
+        InterviewQuestion.id == question_id,
+    ).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="질문을 찾을 수 없습니다.")
+
+    follow_up = db.query(FollowUpQuestion).filter(
+        FollowUpQuestion.id == follow_up_id,
+        FollowUpQuestion.question_id == question.id,
+    ).first()
+    if not follow_up:
+        raise HTTPException(status_code=404, detail="삭제할 꼬리질문을 찾을 수 없습니다.")
+
+    db.delete(follow_up)
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"❌ 꼬리질문 삭제 에러: {e}")
+        raise HTTPException(status_code=500, detail=f"꼬리질문 삭제 실패: {str(e)}")
+
+    return {"message": "꼬리질문이 삭제되었습니다."}
+
+
 @router.delete("/sessions/{session_id}")
 def delete_interview_session(
     session_id: str,
@@ -1361,6 +1415,7 @@ def get_sessions(
             follow_ups = []
             for fu in q.follow_ups:
                 follow_ups.append({
+                    "id": fu.id,
                     "question": fu.question_text,
                     "intent": fu.intent,
                     "userAnswer": fu.user_answer or "",
