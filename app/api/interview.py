@@ -145,7 +145,18 @@ class AnswerItem(BaseModel):
     evaluation_axes: Optional[List[Dict[str, Any]]] = None
     userAnswer: str
     feedback: Optional[str] = None
+    feedbackLogs: Optional[List[Dict[str, Any]]] = None
     followUps: Optional[List[dict]] = None
+
+
+class OverallReportRequest(BaseModel):
+    company: str
+    job_role: str
+    interview_type: Optional[str] = "전체"
+    axes_used: Optional[List[Dict[str, Any]]] = None
+    answers: List[AnswerItem]
+    analysis_id: Optional[int] = None
+    resume_id: Optional[int] = None
 
 
 class EvaluationAxisItem(BaseModel):
@@ -163,6 +174,31 @@ class SaveSessionRequest(BaseModel):
     axis_type: Optional[str] = "static"
     axes_used: Optional[List[EvaluationAxisItem]] = None
     answers: List[AnswerItem]
+    overall_report: Optional[Dict[str, Any]] = None
+
+
+def _clamp_score(value: Any, minimum: float, maximum: float) -> Optional[float]:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(minimum, min(maximum, score))
+
+
+def _category_label(category: Optional[str]) -> str:
+    labels = {
+        "behavioral": "인성/경험",
+        "situational": "상황 판단",
+        "values": "가치관",
+        "growth": "성장 가능성",
+        "communication": "커뮤니케이션",
+        "technical": "직무/기술",
+        "problem_solving": "문제 해결",
+        "project": "프로젝트",
+        "design": "설계/구조화",
+        "impact": "성과/임팩트",
+    }
+    return labels.get(category or "", "기본")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1101,9 +1137,203 @@ def get_follow_up_question(
 
 
 # ─────────────────────────────────────────────────────────────
-# 엔드포인트 6: 세션 저장
+# 엔드포인트 6: 전체 면접 리포트 생성
 # ─────────────────────────────────────────────────────────────
-# 엔드포인트 6: 세션 저장
+@router.post("/overall-report")
+def get_overall_interview_report(
+    req: OverallReportRequest,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+):
+    """면접 세션 전체 답변과 피드백을 바탕으로 종합 평가 리포트를 생성합니다."""
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    ctx = _build_db_context(db, current_user, req.company, req.job_role, req.analysis_id, req.resume_id)
+    answered = [a for a in req.answers if a.userAnswer and a.userAnswer.strip()]
+    if not answered:
+        raise HTTPException(status_code=400, detail="종합 리포트를 생성하려면 답변이 1개 이상 필요합니다.")
+
+    question_blocks = []
+    canonical_question_reviews = []
+    dimension_buckets: Dict[str, List[float]] = {}
+    for idx, a in enumerate(req.answers, start=1):
+        feedback_obj = None
+        if a.feedback:
+            try:
+                feedback_obj = json.loads(a.feedback) if isinstance(a.feedback, str) else a.feedback
+            except Exception:
+                feedback_obj = a.feedback
+        feedback_logs = a.feedbackLogs or []
+        if not feedback_logs and isinstance(feedback_obj, dict) and isinstance(feedback_obj.get("feedback_logs"), list):
+            feedback_logs = feedback_obj.get("feedback_logs") or []
+        feedback_score = None
+        if isinstance(feedback_obj, dict):
+            feedback_score = _clamp_score(feedback_obj.get("overall_score"), 1, 5)
+        dimension_name = a.axis_name or _category_label(a.category)
+        if feedback_score is not None and a.userAnswer and a.userAnswer.strip():
+            dimension_buckets.setdefault(dimension_name, []).append(feedback_score * 20)
+        follow_up_blocks = []
+        for fu in a.followUps or []:
+            follow_up_blocks.append({
+                "question": fu.get("question"),
+                "intent": fu.get("intent"),
+                "answer": fu.get("userAnswer"),
+                "feedback": fu.get("feedback"),
+            })
+        question_blocks.append({
+            "index": idx,
+            "question": a.question,
+            "category": a.category,
+            "axis_name": a.axis_name,
+            "answer": a.userAnswer,
+            "feedback": feedback_obj,
+            "feedback_logs": feedback_logs,
+            "fixed_feedback_score_1_to_5": int(round(feedback_score)) if feedback_score is not None else None,
+            "dimension_name": dimension_name,
+            "follow_ups": follow_up_blocks,
+        })
+        canonical_question_reviews.append({
+            "question": a.question,
+            "score": int(round(feedback_score)) if feedback_score is not None else None,
+            "summary": None,
+            "priority": None,
+        })
+
+    axes_block = [
+        {
+            "key": ax.get("key"),
+            "name": ax.get("name"),
+            "description": ax.get("description"),
+            "weight": ax.get("weight"),
+        }
+        for ax in (req.axes_used or [])
+    ]
+    report_schema = {
+        "overall_score": 0,
+        "readiness_label": "보완 필요 | 실전 가능 | 합격권",
+        "coach_summary": "면접왕 이형 스타일의 현실적인 총평 2~3문장",
+        "interviewer_one_liner": "실제 면접관이 남길 법한 한줄평",
+        "dimension_scores": {
+            "논리성": 0,
+            "구체성": 0,
+            "직무 적합도": 0,
+            "커뮤니케이션": 0,
+            "리스크 관리": 0,
+        },
+        "strengths": [
+            {"title": "강점명", "evidence": "어떤 답변에서 드러났는지"}
+        ],
+        "risks": [
+            {"title": "감점 리스크", "reason": "왜 감점인지", "fix": "다음 답변에서 고칠 방법"}
+        ],
+        "question_reviews": [
+            {"question": "질문 요약", "score": 1, "summary": "질문별 짧은 평가", "priority": "유지 | 보완 | 재작성"}
+        ],
+        "next_actions": [
+            {"title": "우선순위 액션", "detail": "다음 연습에서 바로 할 일"}
+        ],
+        "answer_growth": {
+            "summary": "피드백 로그를 기준으로 사용자 답변이 어떻게 향상되고 있는지 2~3문장",
+            "score_trend": "점수 변화 요약",
+            "improved_points": ["개선된 지점"],
+            "remaining_gaps": ["아직 남은 보완점"]
+        },
+        "visual_summary": {
+            "answered_count": len(answered),
+            "total_questions": len(req.answers),
+            "top_dimension": "가장 강한 역량",
+            "weak_dimension": "가장 먼저 보완할 역량"
+        }
+    }
+
+    prompt = f"""
+당신은 '면접왕 이형' 스타일의 현실적인 면접 코치입니다.
+칭찬으로 포장하지 말고, 실제 면접관 관점에서 합격 가능성을 높이는 종합 평가 리포트를 작성하세요.
+지원자의 답변, 질문별 피드백, 꼬리질문 답변을 근거로 냉정하지만 실행 가능한 피드백을 제공합니다.
+
+[회사/직무] {req.company} · {req.job_role}
+[면접 유형] {req.interview_type}
+[JD/기업 분석 참고]
+{ctx.get("company_analysis", "")[:900]}
+{ctx.get("jd", "")[:900]}
+[평가 기준]
+{json.dumps(axes_block, ensure_ascii=False)}
+[질문/답변/피드백 데이터]
+{json.dumps(question_blocks, ensure_ascii=False)}
+
+작성 원칙:
+1. overall_score와 dimension_scores는 0~100 정수로 작성합니다.
+1-1. question_reviews의 score는 질문/답변 데이터의 fixed_feedback_score_1_to_5를 그대로 사용합니다. 절대 새로 추정하지 마세요.
+1-2. dimension_scores는 각 질문의 dimension_name과 fixed_feedback_score_1_to_5를 근거로 판단합니다.
+2. 답변하지 않은 질문은 낮은 점수로 억지 평가하지 말고 응답률/준비도 리스크로 반영합니다.
+3. 인성 면접이면 태도, 회고, 협업, 커뮤니케이션, 성장 가능성을 더 중시합니다.
+4. 실무 면접이면 문제 정의, 기술 선택 근거, 트레이드오프, 성과, 직무 적합도를 더 중시합니다.
+5. 질문별 평가는 전체 질문을 모두 포함하되, 각 summary는 한 문장으로 짧게 작성합니다.
+6. answer_growth는 feedback_logs의 점수, 보완점, 리스크 변화, 답변 내용 변화를 근거로 작성합니다.
+6-1. 피드백 로그가 2개 이상인 질문이 있으면 이전 로그와 최신 로그를 비교해 어떤 부분이 좋아졌는지 서술합니다.
+6-2. 피드백 로그가 1개뿐이면 "아직 반복 피드백 로그가 부족하지만 현재 로그 기준으로 보이는 개선 방향"이라고 명시합니다.
+7. strengths, risks, next_actions는 각각 3개로 작성합니다.
+8. 반드시 아래 JSON 스키마와 같은 키만 사용하고 JSON 객체만 출력하세요.
+
+{json.dumps(report_schema, ensure_ascii=False, indent=2)}
+"""
+
+    try:
+        raw = _call_openai(prompt, max_tokens=2200, temperature=0.45)
+        result = _extract_json(raw)
+        if not isinstance(result, dict):
+            raise ValueError("리포트 응답이 JSON 객체가 아닙니다.")
+        generated_reviews = result.get("question_reviews") if isinstance(result.get("question_reviews"), list) else []
+        fixed_reviews = []
+        for idx, canonical in enumerate(canonical_question_reviews):
+            generated = generated_reviews[idx] if idx < len(generated_reviews) and isinstance(generated_reviews[idx], dict) else {}
+            fixed_reviews.append({
+                "question": generated.get("question") or canonical["question"],
+                "score": canonical["score"],
+                "summary": generated.get("summary") or "질문별 피드백 점수를 기준으로 요약이 필요합니다.",
+                "priority": generated.get("priority") or ("미평가" if canonical["score"] is None else "보완"),
+            })
+        result["question_reviews"] = fixed_reviews
+
+        fixed_dimension_scores = {
+            name: int(round(sum(scores) / len(scores)))
+            for name, scores in dimension_buckets.items()
+            if scores
+        }
+        if fixed_dimension_scores:
+            result["dimension_scores"] = fixed_dimension_scores
+            top_dimension = max(fixed_dimension_scores, key=fixed_dimension_scores.get)
+            weak_dimension = min(fixed_dimension_scores, key=fixed_dimension_scores.get)
+            result["visual_summary"] = {
+                **(result.get("visual_summary") if isinstance(result.get("visual_summary"), dict) else {}),
+                "answered_count": len(answered),
+                "total_questions": len(req.answers),
+                "top_dimension": top_dimension,
+                "weak_dimension": weak_dimension,
+            }
+
+        scored_reviews = [item["score"] for item in fixed_reviews if item["score"] is not None]
+        if scored_reviews:
+            overall_score = int(round((sum(scored_reviews) / len(scored_reviews)) * 20))
+            result["overall_score"] = overall_score
+            if overall_score < 50:
+                result["readiness_label"] = "보완 필요"
+            elif overall_score < 75:
+                result["readiness_label"] = "실전 가능"
+            else:
+                result["readiness_label"] = "합격권"
+        result["generated_at"] = datetime.utcnow().isoformat()
+        result["is_outdated"] = False
+        return result
+    except Exception as e:
+        print("❌ 전체 면접 리포트 생성 에러:", e)
+        raise HTTPException(status_code=500, detail=f"전체 면접 리포트 생성 실패: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────
+# 엔드포인트 7: 세션 저장
+# ─────────────────────────────────────────────────────────────
+# 엔드포인트 7: 세션 저장
 # ─────────────────────────────────────────────────────────────
 @router.post("/sessions")
 def save_interview_session(
@@ -1141,6 +1371,8 @@ def save_interview_session(
         "answered_questions": answered_q,
         "score": avg_score
     }
+    if req.overall_report is not None:
+        stats_data["overall_report"] = req.overall_report
     
     axes_used_data = [ax.dict() for ax in req.axes_used] if req.axes_used else []
 
@@ -1203,6 +1435,8 @@ def save_interview_session(
                 feedback_obj = json.loads(a.feedback) if isinstance(a.feedback, str) else a.feedback
             except Exception:
                 feedback_obj = a.feedback
+        if isinstance(feedback_obj, dict) and a.feedbackLogs is not None:
+            feedback_obj["feedback_logs"] = a.feedbackLogs
                 
         question = db.query(InterviewQuestion).filter(
             InterviewQuestion.session_id == session_id,
@@ -1431,6 +1665,7 @@ def get_sessions(
                 "axis_name": q.axis_name,
                 "userAnswer": q.user_answer or "",
                 "feedback": q.feedback,
+                "feedbackLogs": q.feedback.get("feedback_logs", []) if isinstance(q.feedback, dict) else [],
                 "followUps": follow_ups
             })
             
@@ -1443,7 +1678,8 @@ def get_sessions(
             "axes_used": s.axes_used,
             "answers": answers,
             "created_at": s.created_at.isoformat() if s.created_at else datetime.utcnow().isoformat(),
-            "stats": s.stats
+            "stats": s.stats,
+            "overall_report": (s.stats or {}).get("overall_report") if isinstance(s.stats, dict) else None
         })
         
     return result
