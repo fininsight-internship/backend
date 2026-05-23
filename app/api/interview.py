@@ -1082,6 +1082,26 @@ def save_interview_session(
         print(f"❌ 면접 세션 저장 에러: {e}")
         raise HTTPException(status_code=500, detail=f"면접 세션 저장 실패: {str(e)}")
 
+    # 저장 요청에서 빠진 질문은 삭제된 질문으로 간주하여 답변/피드백/꼬리질문까지 정리합니다.
+    incoming_question_ids = [a.id for a in req.answers]
+    existing_questions_query = db.query(InterviewQuestion).filter(InterviewQuestion.session_id == session_id)
+    if incoming_question_ids:
+        questions_to_delete = existing_questions_query.filter(~InterviewQuestion.id.in_(incoming_question_ids)).all()
+    else:
+        questions_to_delete = existing_questions_query.all()
+
+    for question_to_delete in questions_to_delete:
+        db.query(FollowUpQuestion).filter(FollowUpQuestion.question_id == question_to_delete.id).delete()
+        db.delete(question_to_delete)
+
+    if questions_to_delete:
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"❌ 삭제된 면접 질문 정리 에러: {e}")
+            raise HTTPException(status_code=500, detail=f"삭제된 면접 질문 정리 실패: {str(e)}")
+
     # 2. 면접 질문(InterviewQuestion) 개별 Upsert
     for a in req.answers:
         feedback_obj = None
@@ -1153,6 +1173,58 @@ def save_interview_session(
 
     print(f"🎉 [DB] 세션(ID: {session_id}) 및 질문 전체 저장 완료!")
     return {"message": "면접 세션이 성공적으로 저장되었습니다.", "session_id": session_id}
+
+
+@router.delete("/sessions/{session_id}/questions/{question_id}")
+def delete_interview_question(
+    session_id: str,
+    question_id: str,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None)
+):
+    """저장된 면접 세션에서 질문과 연결된 꼬리질문을 삭제합니다."""
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    session = db.query(InterviewSession).filter(
+        InterviewSession.id == session_id,
+        InterviewSession.user_id == current_user.id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="면접 세션을 찾을 수 없습니다.")
+
+    question = db.query(InterviewQuestion).filter(
+        InterviewQuestion.session_id == session_id,
+        InterviewQuestion.id == question_id,
+    ).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="삭제할 질문을 찾을 수 없습니다.")
+
+    db.query(FollowUpQuestion).filter(FollowUpQuestion.question_id == question.id).delete()
+    db.delete(question)
+
+    remaining_questions = db.query(InterviewQuestion).filter(
+        InterviewQuestion.session_id == session_id,
+        InterviewQuestion.id != question_id,
+    ).all()
+    scores = []
+    for item in remaining_questions:
+        if isinstance(item.feedback, dict) and "overall_score" in item.feedback:
+            scores.append(item.feedback["overall_score"])
+
+    session.stats = {
+        "total_questions": len(remaining_questions),
+        "answered_questions": sum(1 for item in remaining_questions if item.user_answer and item.user_answer.strip()),
+        "score": (sum(scores) / len(scores) * 20) if scores else None,
+    }
+
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"❌ 면접 질문 삭제 에러: {e}")
+        raise HTTPException(status_code=500, detail=f"면접 질문 삭제 실패: {str(e)}")
+
+    return {"message": "질문이 삭제되었습니다."}
 
 
 @router.get("/sessions")
