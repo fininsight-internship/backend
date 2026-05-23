@@ -110,6 +110,7 @@ class FeedbackRequest(BaseModel):
     question: str
     user_answer: str
     feature_weights: Optional[Dict[str, float]] = None
+    evaluation_axes: Optional[List[Dict[str, Any]]] = None
     analysis_id: Optional[int] = None
     resume_id: Optional[int] = None
 
@@ -138,6 +139,7 @@ class AnswerItem(BaseModel):
     tips: str
     evaluation_axis: Optional[str] = None
     axis_name: Optional[str] = None
+    evaluation_axes: Optional[List[Dict[str, Any]]] = None
     userAnswer: str
     feedback: Optional[str] = None
     followUps: Optional[List[dict]] = None
@@ -236,10 +238,35 @@ def _serialize_analysis(row: CompanyJDAnalysis) -> dict:
     }
 
 
-def _analysis_signature(row: CompanyJDAnalysis, axis_type: str) -> str:
+def _normalize_interview_type(interview_type: Optional[str]) -> str:
+    return interview_type if interview_type in {"인성", "실무"} else "전체"
+
+
+def _axis_generation_guidance(interview_type: Optional[str]) -> str:
+    normalized = _normalize_interview_type(interview_type)
+    if normalized == "인성":
+        return """
+이번 평가축은 인성 면접용입니다.
+기술 지식이나 구현 역량이 아니라 지원자의 태도, 협업 방식, 가치관, 성장 가능성, 커뮤니케이션, 조직 적응력을 평가하는 축으로 구성하세요.
+예: 자기이해와 회고, 협업과 갈등 해결, 지원 동기와 조직 적합성, 성장 의지, 커뮤니케이션 균형, 책임감과 태도
+"""
+    if normalized == "실무":
+        return """
+이번 평가축은 실무 면접용입니다.
+지원자의 직무 수행 능력, 문제 해결력, 프로젝트 수행 경험, 설계/구조화 능력, 성과와 임팩트를 평가하는 축으로 구성하세요.
+예: 직무/기술 역량, 문제 해결력, 프로젝트 실행력, 설계/구조화, 성과/임팩트, 실무 협업 방식
+"""
+    return """
+이번 평가축은 혼합 면접용입니다.
+인성 면접과 실무 면접에서 모두 활용할 수 있는 균형 잡힌 평가축으로 구성하세요.
+"""
+
+
+def _analysis_signature(row: CompanyJDAnalysis, axis_type: str, interview_type: Optional[str] = "전체") -> str:
     report = row.analysis_report or {}
     payload = {
         "axis_type": axis_type,
+        "interview_type": _normalize_interview_type(interview_type),
         "company_name": row.company_name,
         "job_role": row.job_role,
         "jd_content": row.jd_content or "",
@@ -404,18 +431,46 @@ def _static_axes_from_weights(weights: Dict[str, float]) -> List[dict]:
     return axes
 
 
+def _static_axes_for_interview_type(weights: Dict[str, float], interview_type: Optional[str]) -> List[dict]:
+    normalized = _normalize_interview_type(interview_type)
+    if normalized == "인성":
+        return [
+            {"key": "self_reflection", "name": "자기이해와 회고", "description": "본인의 강점·약점·실패 경험을 객관적으로 인식하고 개선하려는 태도", "weight": 1.0},
+            {"key": "collaboration_conflict", "name": "협업과 갈등 해결", "description": "팀 안에서 의견 차이를 조율하고 갈등을 건설적으로 해결하는 방식", "weight": 0.95},
+            {"key": "motivation_fit", "name": "지원 동기와 조직 적합성", "description": "회사와 직무를 선택한 이유의 진정성 및 조직 문화와의 적합성", "weight": 0.9},
+            {"key": "growth_mindset", "name": "성장 의지", "description": "피드백 수용, 학습 태도, 장기적 커리어 방향성", "weight": 0.85},
+            {"key": "communication_balance", "name": "커뮤니케이션 균형", "description": "상대방을 존중하면서 자신의 의견을 명확히 전달하는 능력", "weight": 0.8},
+            {"key": "responsibility_attitude", "name": "책임감과 태도", "description": "어려운 상황에서 책임을 회피하지 않고 끝까지 해결하려는 태도", "weight": 0.75},
+        ]
+    if normalized == "실무":
+        base_axes = _static_axes_from_weights(weights)
+        if base_axes:
+            return base_axes
+        return [
+            {"key": "technical_competency", "name": "직무/기술 역량", "description": "직무 수행에 필요한 기술 지식과 실무 적용 능력", "weight": 1.0},
+            {"key": "problem_solving", "name": "문제 해결력", "description": "문제 원인을 구조적으로 파악하고 해결책을 실행하는 능력", "weight": 0.95},
+            {"key": "project_execution", "name": "프로젝트 실행력", "description": "프로젝트에서 맡은 역할, 의사결정, 실행 과정을 설명하는 능력", "weight": 0.9},
+            {"key": "system_design", "name": "설계/구조화", "description": "요구사항을 구조화하고 확장 가능한 방식으로 설계하는 능력", "weight": 0.85},
+            {"key": "impact", "name": "성과/임팩트", "description": "업무 결과를 수치나 사용자/비즈니스 효과로 설명하는 능력", "weight": 0.8},
+            {"key": "practical_collaboration", "name": "실무 협업", "description": "리뷰, 일정 조율, 커뮤니케이션을 통해 결과물을 완성하는 능력", "weight": 0.75},
+        ]
+    return _static_axes_from_weights(weights)
+
+
 def _get_cached_or_create_axes(
     db: Session,
     analysis: CompanyJDAnalysis,
     ctx: dict,
     axis_type: str,
+    interview_type: Optional[str] = "전체",
 ) -> tuple[Dict[str, float], List[dict], Dict[str, str]]:
     """
     평가축은 JD/기업분석만 사용해 산출하고 source signature 기준으로 캐시합니다.
     자소서는 질문 내용 생성에는 쓰지만 평가 기준 산출에는 절대 쓰지 않습니다.
     """
     normalized_axis_type = axis_type if axis_type in {"static", "dynamic"} else "static"
-    signature = _analysis_signature(analysis, normalized_axis_type)
+    normalized_interview_type = _normalize_interview_type(interview_type)
+    signature = _analysis_signature(analysis, normalized_axis_type, normalized_interview_type)
     cached = db.query(InterviewEvaluationAxisCache).filter(
         InterviewEvaluationAxisCache.source_signature == signature
     ).first()
@@ -435,6 +490,7 @@ def _get_cached_or_create_axes(
         axes_prompt = f"""
 당신은 기업 면접관입니다. 아래 JD와 기업분석 데이터를 바탕으로 해당 직무에 필요한 핵심 평가축(역량) 6가지를 동적으로 추출하세요.
 평가축은 지원자 개인 자소서가 아니라 채용공고와 기업/직무 분석 기준에서만 도출해야 합니다.
+{_axis_generation_guidance(normalized_interview_type)}
 
 [지원 기업] {analysis.company_name}
 [지원 직무] {analysis.job_role}
@@ -463,17 +519,17 @@ def _get_cached_or_create_axes(
             dynamic_map = {ax["key"]: ax["name"] for ax in axes}
         except Exception as e:
             print("동적 평가축 추출 실패, 정적 평가축으로 폴백:", e)
-            axes = _static_axes_from_weights(weights)
+            axes = _static_axes_for_interview_type(weights, normalized_interview_type)
             dynamic_map = {ax["key"]: ax["name"] for ax in axes}
     else:
-        axes = _static_axes_from_weights(weights)
+        axes = _static_axes_for_interview_type(weights, normalized_interview_type)
         dynamic_map = {ax["key"]: ax["name"] for ax in axes}
 
     cache = InterviewEvaluationAxisCache(
         source_signature=signature,
         company_name=analysis.company_name,
         job_role=analysis.job_role,
-        axis_type=normalized_axis_type,
+        axis_type=f"{normalized_axis_type}:{normalized_interview_type}",
         axes=axes,
         feature_weights=weights,
     )
@@ -535,7 +591,7 @@ def evaluate_axes(
     current_user = get_current_user(db, x_user_id, x_user_email)
     analysis = _get_required_analysis(db, current_user, req.analysis_id)
     ctx = _build_db_context(db, current_user, analysis.company_name, analysis.job_role, req.analysis_id, None)
-    weights, axes, _ = _get_cached_or_create_axes(db, analysis, ctx, req.axis_type or "static")
+    weights, axes, _ = _get_cached_or_create_axes(db, analysis, ctx, req.axis_type or "static", req.interview_type)
 
     return {
         "company": analysis.company_name,
@@ -570,6 +626,7 @@ def get_interview_questions(
         analysis,
         ctx,
         req.axis_type or "static",
+        req.interview_type,
     )
     axes_desc = "\n".join(
         [f"- {ax.get('name')}: {ax.get('description')} (weight: {ax.get('weight', 0)})" for ax in axes_used_info]
@@ -897,11 +954,31 @@ def get_answer_feedback(
     ctx = _build_db_context(db, current_user, req.company, req.job_role, req.analysis_id, req.resume_id)
     weights = req.feature_weights or _compute_weights_from_context(ctx) or compute_feature_weights(req.company, req.job_role)
 
-    top_axes = list(weights.items())[:4]
-    axes_desc = "\n".join(
-        [f"- {FEATURE_TAXONOMY[k]['name']} (weight: {v})"
-         for k, v in top_axes if k in FEATURE_TAXONOMY]
-    )
+    selected_axes = req.evaluation_axes or []
+    if selected_axes:
+        axes_desc = "\n".join(
+            [f"- {ax.get('name')}: {ax.get('description', '')} (weight: {ax.get('weight', 0)})" for ax in selected_axes]
+        )
+        evaluation_instruction = f"""
+[이 질문에 연결된 평가 기준]
+{axes_desc}
+
+위 평가 기준을 중심으로 답변을 평가하세요. risk_points의 axis에는 평가 기준명을 넣으세요.
+"""
+    else:
+        evaluation_instruction = """
+[공통 면접 답변 평가 기준]
+이 질문은 특정 평가축에 연결되지 않은 직접 추가 질문입니다.
+아래 공통 기준으로 답변을 평가하세요:
+1. 질문 의도 파악: 질문에 직접 답했는가
+2. 구체성: 실제 경험, 상황, 행동, 결과가 있는가
+3. 논리성: 답변 흐름이 자연스럽고 설득력 있는가
+4. 직무/회사 연관성: 지원 직무나 회사와 연결되는가
+5. 자기 이해도: 본인의 강점, 약점, 가치관, 판단 기준이 드러나는가
+6. 감점 리스크: 과장, 책임 회피, 모호한 표현, 부정적 태도가 있는가
+
+risk_points의 axis에는 위 공통 기준명 중 가장 관련 있는 항목을 넣으세요.
+"""
 
     prompt = f"""
 당신은 엄격하지만 건설적인 면접관입니다. 아래 지원자의 답변을 평가하세요.
@@ -911,8 +988,7 @@ def get_answer_feedback(
 [면접 질문] {req.question}
 [지원자 답변] {req.user_answer}
 
-[이 기업/직무의 핵심 평가축 (중요도 순)]
-{axes_desc}
+{evaluation_instruction}
 
 [자소서 참조 (답변과 일관성 검증에 활용)]
 {ctx['resume']}
@@ -1225,6 +1301,38 @@ def delete_interview_question(
         raise HTTPException(status_code=500, detail=f"면접 질문 삭제 실패: {str(e)}")
 
     return {"message": "질문이 삭제되었습니다."}
+
+
+@router.delete("/sessions/{session_id}")
+def delete_interview_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None)
+):
+    """저장된 면접 세션과 연결된 질문/꼬리질문을 모두 삭제합니다."""
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    session = db.query(InterviewSession).filter(
+        InterviewSession.id == session_id,
+        InterviewSession.user_id == current_user.id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="면접 세션을 찾을 수 없습니다.")
+
+    questions = db.query(InterviewQuestion).filter(InterviewQuestion.session_id == session_id).all()
+    for question in questions:
+        db.query(FollowUpQuestion).filter(FollowUpQuestion.question_id == question.id).delete()
+        db.delete(question)
+    db.delete(session)
+
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"❌ 면접 세션 삭제 에러: {e}")
+        raise HTTPException(status_code=500, detail=f"면접 세션 삭제 실패: {str(e)}")
+
+    return {"message": "면접 세션이 삭제되었습니다."}
 
 
 @router.get("/sessions")
