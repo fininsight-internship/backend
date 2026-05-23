@@ -12,6 +12,11 @@ from openai import OpenAI
 import anthropic
 from google import genai as google_genai
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session
+
+from app.core.db import get_db
+from app.core.auth import get_current_user
+from app.models.db_models import User, InterviewSession, InterviewQuestion, FollowUpQuestion
 
 from app.core.db import get_db
 from app.models.db_models import User, InterviewSession, InterviewQuestion, FollowUpQuestion
@@ -577,11 +582,10 @@ def save_interview_session(
     current_user = get_current_user(db, x_user_id, x_user_email)
     session_id = req.session_id or f"session-{uuid.uuid4().hex[:8]}"
     
-    # Calculate some stats for the session
+    # 세션 통계 계산
     total_q = len(req.answers)
     answered_q = sum(1 for a in req.answers if a.userAnswer and a.userAnswer.strip())
     
-    # Simple score calculation if feedback exists
     scores = []
     for a in req.answers:
         if a.feedback:

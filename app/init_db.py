@@ -12,6 +12,7 @@ from app.models.db_models import (
     Experience, 
     Application, 
     CompanyJDAnalysis, 
+    CompanyReport,
     InterviewSession, 
     InterviewQuestion, 
     FollowUpQuestion, 
@@ -25,9 +26,8 @@ from app.models.db_models import (
 def init_db():
     print("🚀 PostgreSQL 'careerai' 데이터베이스 테이블 재생성 중...")
     try:
-        # 기존 테이블들 초기화 (마이그레이션 및 컬럼 변경 반영을 위해 재생성)
+        # 설계된 모든 테이블 자동 생성 (마이그레이션 및 컬럼 변경 반영을 위해 전체 드롭 후 재생성)
         Base.metadata.drop_all(bind=engine)
-        # 설계된 모든 테이블 자동 생성
         Base.metadata.create_all(bind=engine)
         print("🎉 대박! 모든 데이터베이스 테이블이 성공적으로 생성되었습니다!")
         

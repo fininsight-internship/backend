@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Header
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from pydantic import BaseModel
 
 from app.core.db import get_db
@@ -207,7 +207,6 @@ def save_user_experience(
                     start_date=c.startDate,
                     end_date=c.endDate,
                     detail=c.detail,
-                    # 하위 호환 매핑
                     company_name=c.company,
                     role=c.department,
                     description=c.detail
@@ -223,7 +222,6 @@ def save_user_experience(
                     title=b.name,
                     topic=b.topic,
                     detail=b.detail,
-                    # 하위 호환 매핑
                     company_name=b.name,
                     role=b.topic,
                     description=b.detail
@@ -246,7 +244,6 @@ def save_user_experience(
                         category=cat,
                         title=item.title,
                         detail=item.detail,
-                        # 하위 호환 매핑
                         company_name=item.title,
                         description=item.detail
                     )
@@ -260,3 +257,44 @@ def save_user_experience(
         db.rollback()
         print("❌ 경험 데이터베이스 영속화 실패:", e)
         raise HTTPException(status_code=500, detail=f"데이터베이스 저장 중 심각한 오류가 발생했습니다: {str(e)}")
+
+
+class DetailUpdateRequest(BaseModel):
+    detail: str
+
+
+@router.patch("/{exp_id}/detail")
+def update_detail(
+    exp_id: int,
+    req: DetailUpdateRequest,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    db: Session = Depends(get_db)
+):
+    """
+    특정 경험 항목의 상세 내용(detail)을 업데이트합니다.
+    """
+    if not x_user_id:
+        test_user = db.query(User).filter(User.email == "dbeaver_test@careerai.com").first()
+        if not test_user:
+            test_user = db.query(User).first()
+        if not test_user:
+            raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+        user_id = test_user.id
+    else:
+        try:
+            user_id = int(x_user_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="유효하지 않은 X-User-Id 헤더입니다.")
+
+    exp = db.query(Experience).filter(Experience.id == exp_id, Experience.user_id == user_id).first()
+    if not exp:
+        raise HTTPException(status_code=404, detail="해당 경험 항목을 찾을 수 없습니다.")
+
+    try:
+        exp.detail = req.detail
+        exp.description = req.detail
+        db.commit()
+        return {"status": "success", "message": "경험 상세 내용이 저장되었습니다."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"저장 중 오류가 발생했습니다: {str(e)}")

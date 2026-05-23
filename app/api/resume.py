@@ -1,9 +1,12 @@
 ## 자소서 ##
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
+from sqlalchemy.orm import Session
 from app.services import resume_service
+from app.models.db_models import CompanyJDAnalysis
+from app.core.db import get_db
 
 router = APIRouter(prefix="/resume", tags=["Resume"])
 
@@ -167,5 +170,139 @@ async def evaluate_detailed(req: EvaluateDetailedRequest):
             req.draft, req.company_name, req.job_title, req.cover_question,
             req.selections, req.company_insights or ""
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Overall evaluation ────────────────────────────────────────────
+
+class OverallEvaluationSaveRequest(BaseModel):
+    user_id: int
+    company_name: str
+    job_title: str
+    overall_feedback: str
+    resume_id: Optional[int] = None
+
+
+@router.post("/evaluations/save")
+def evaluation_save(req: OverallEvaluationSaveRequest, db: Session = Depends(get_db)):
+    try:
+        result = resume_service.save_overall_evaluation(
+            db, req.user_id, req.company_name, req.job_title, req.overall_feedback, req.resume_id
+        )
+        return {"status": "success", "evaluation": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Experience matching ───────────────────────────────────────────
+
+class ExperienceMatchRequest(BaseModel):
+    question: str
+    experiences: List[dict]
+
+
+@router.post("/experience-match")
+async def experience_match(req: ExperienceMatchRequest):
+    try:
+        return resume_service.match_experiences(req.question, req.experiences)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── JD 분석 조회 ─────────────────────────────────────────────────────
+
+@router.get("/jd-info")
+def jd_info(user_id: int, company_name: str, job_role: str, db: Session = Depends(get_db)):
+    """해당 유저의 company_jd_analysis 테이블에서 JD 분석 결과를 반환한다."""
+    row = (
+        db.query(CompanyJDAnalysis)
+        .filter(
+            CompanyJDAnalysis.user_id == user_id,
+            CompanyJDAnalysis.company_name == company_name,
+            CompanyJDAnalysis.job_role == job_role,
+        )
+        .order_by(CompanyJDAnalysis.id.desc())
+        .first()
+    )
+    if not row:
+        return {"status": "not_found", "jd_content": None, "analysis_report": None}
+    return {
+        "status": "success",
+        "jd_content": row.jd_content,
+        "analysis_report": row.analysis_report,
+    }
+
+
+# ── Cover letter draft DB CRUD ──────────────────────────────────────
+
+class ResumeCreateRequest(BaseModel):
+    user_id: int
+    company_name: str
+    job_title: str
+
+
+@router.post("/create")
+def resume_create(req: ResumeCreateRequest, db: Session = Depends(get_db)):
+    try:
+        result = resume_service.create_resume(db, req.user_id, req.company_name, req.job_title)
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class DraftSaveRequest(BaseModel):
+    user_id: int
+    company_name: str
+    job_title: str
+    question_text: str
+    draft_content: str
+    ai_score: Optional[float] = None
+    ai_feedback: Optional[str] = None
+    resume_id: Optional[int] = None
+
+
+class DraftDeleteRequest(BaseModel):
+    user_id: int
+
+
+@router.post("/drafts/save")
+def draft_save(req: DraftSaveRequest, db: Session = Depends(get_db)):
+    try:
+        result = resume_service.save_draft(
+            db=db,
+            user_id=req.user_id,
+            company_name=req.company_name,
+            job_title=req.job_title,
+            question_text=req.question_text,
+            draft_content=req.draft_content,
+            ai_score=req.ai_score,
+            ai_feedback=req.ai_feedback,
+            resume_id=req.resume_id,
+        )
+        return {"status": "success", "draft": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/drafts")
+def draft_list(user_id: int, company_name: str, job_title: str,
+               resume_id: Optional[int] = None, db: Session = Depends(get_db)):
+    try:
+        result = resume_service.get_drafts(db, user_id, company_name, job_title, resume_id)
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/drafts/{draft_id}")
+def draft_delete(draft_id: int, req: DraftDeleteRequest, db: Session = Depends(get_db)):
+    try:
+        deleted = resume_service.delete_draft(db, draft_id, req.user_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="초안을 찾을 수 없습니다.")
+        return {"status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
