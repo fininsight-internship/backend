@@ -599,6 +599,7 @@ def get_interview_questions(
 {type_condition}
 4. 이 직무의 약점으로 분석된 지식 검증 질문 1개 이상 포함
 5. evaluation_axis 필드에 해당 질문이 검증하는 평가축 key를 명시
+6. tips 필드에는 단순한 일반 조언이 아니라, 해당 evaluation_axis의 평가기준 중 어떤 세부 포인트를 면접관이 집중해서 보는지 1~2문장으로 서술하세요.
 
 반드시 아래 JSON 배열 형식으로만 출력하세요. 설명, 인사말, 코드블록(```) 절대 출력 금지.
 
@@ -608,7 +609,7 @@ def get_interview_questions(
     "question": "질문 내용 (자소서 경험 기반 구체적으로)",
     "category": "behavioral | technical | situational",
     "evaluation_axis": "평가축 key",
-    "tips": "이 질문에서 면접관이 보고자 하는 포인트"
+    "tips": "이 평가기준 안에서 면접관이 집중해서 확인하려는 세부 포인트"
   }}
 ]
 """
