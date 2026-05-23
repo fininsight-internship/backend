@@ -93,6 +93,17 @@ class QuestionRequest(BaseModel):
     resume_id: Optional[int] = None
 
 
+class AdditionalQuestionRequest(BaseModel):
+    company: str
+    job_role: str
+    interview_type: Optional[str] = "전체"
+    analysis_id: Optional[int] = None
+    resume_id: Optional[int] = None
+    selected_axes: List[Dict[str, Any]]
+    question_count: int
+    existing_questions: Optional[List[str]] = None
+
+
 class FeedbackRequest(BaseModel):
     company: str
     job_role: str
@@ -566,12 +577,41 @@ def get_interview_questions(
                 
     # 3) 면접 유형에 따른 조건 추가
     type_condition = ""
+    type_specific_requirement = ""
     if req.interview_type == "인성":
-        type_condition = "3. 반드시 5개 질문 모두 지원자의 경험, 가치관, 상황 대처 능력을 묻는 '인성/경험' (behavioral/situational) 카테고리로만 생성하세요."
+        type_condition = (
+            "3. 반드시 5개 질문 모두 인성 면접 카테고리 중 하나로만 생성하세요: "
+            "behavioral(인성/경험), situational(상황 판단), values(가치관), "
+            "growth(성장 가능성), communication(커뮤니케이션)."
+        )
+        type_specific_requirement = """
+4. 기술 지식, 프레임워크, 구현 방법, 코딩/설계 세부 지식을 직접 검증하는 질문은 만들지 마세요.
+5. 아래 인성 면접 대표 질문 흐름을 참고해 지원자의 태도와 사고방식을 확인하는 질문으로 구성하세요:
+   - 자기소개: 커뮤니케이션 능력, 경험 정리 능력, 첫인상 확인
+   - 장점과 단점: 자기 객관화 능력, 단점 개선 노력 확인
+   - 힘들었던 경험과 극복 과정: 문제 해결 방식, 멘탈, 태도 확인
+   - 팀 프로젝트 갈등 경험: 협업 스타일, 갈등 해결 방식 확인
+   - 회사 지원 동기: 지원 동기 진정성, 기업 이해도 확인
+   - 직무 선택 이유: 직무 적합성, 커리어 방향성 확인
+   - 실패 경험: 책임 회피 여부, 회고 능력 확인
+   - 부당한 지시 대응: 조직 적응력, 커뮤니케이션 균형 확인
+   - 동료와 의견 차이: 설득 방식, 협업 태도 확인
+   - 5년 후 모습: 성장 의지, 장기적 방향성 확인
+6. 직무와 기업 맥락은 질문의 배경으로만 활용하고, 답변에서 기술 정답을 요구하지 마세요.
+"""
     elif req.interview_type == "실무":
-        type_condition = "3. 반드시 5개 질문 모두 지원자의 직무 지식, 기술적 문제 해결력, 포트폴리오를 검증하는 '실무/기술' (technical) 카테고리로만 생성하세요."
+        type_condition = (
+            "3. 반드시 5개 질문 모두 실무 면접 카테고리 중 하나로만 생성하세요: "
+            "technical(직무/기술), problem_solving(문제 해결), project(프로젝트), "
+            "design(설계/구조화), impact(성과/임팩트)."
+        )
+        type_specific_requirement = "4. 이 직무의 약점으로 분석된 지식 검증 질문 1개 이상 포함"
     else:
-        type_condition = "3. 카테고리: behavioral(경험기반), technical(기술/직무), situational(상황대처) 골고루 섞어서 생성하세요."
+        type_condition = (
+            "3. 카테고리: behavioral, situational, values, growth, communication, "
+            "technical, problem_solving, project, design, impact 중 질문 목적에 맞게 선택하세요."
+        )
+        type_specific_requirement = "4. 이 직무의 약점으로 분석된 지식 검증 질문 1개 이상 포함"
 
     prompt = f"""
 당신은 기업 면접관입니다. 아래 데이터를 참조하여 지원자에게 할 면접 질문을 생성하세요.
@@ -597,9 +637,9 @@ def get_interview_questions(
 1. 선택된 자소서가 있으면 자소서에서 언급된 구체적 경험을 직접 검증하는 질문을 포함하세요. 자소서가 비어 있으면 JD/기업분석 기반 질문으로 구성하세요.
 2. 제시된 핵심 평가축 중심으로 질문을 강화하되, 평가축 자체는 JD/기업분석 기준으로만 해석하세요.
 {type_condition}
-4. 이 직무의 약점으로 분석된 지식 검증 질문 1개 이상 포함
-5. evaluation_axis 필드에 해당 질문이 검증하는 평가축 key를 명시
-6. tips 필드에는 단순한 일반 조언이 아니라, 해당 evaluation_axis의 평가기준 중 어떤 세부 포인트를 면접관이 집중해서 보는지 1~2문장으로 서술하세요.
+{type_specific_requirement}
+7. evaluation_axis 필드에 해당 질문이 검증하는 평가축 key를 명시
+8. tips 필드에는 단순한 일반 조언이 아니라, 해당 evaluation_axis의 평가기준 중 어떤 세부 포인트를 면접관이 집중해서 보는지 1~2문장으로 서술하세요.
 
 반드시 아래 JSON 배열 형식으로만 출력하세요. 설명, 인사말, 코드블록(```) 절대 출력 금지.
 
@@ -607,7 +647,7 @@ def get_interview_questions(
   {{
     "id": "question-1",
     "question": "질문 내용 (자소서 경험 기반 구체적으로)",
-    "category": "behavioral | technical | situational",
+    "category": "behavioral | situational | values | growth | communication | technical | problem_solving | project | design | impact",
     "evaluation_axis": "평가축 key",
     "tips": "이 평가기준 안에서 면접관이 집중해서 확인하려는 세부 포인트"
   }}
@@ -665,6 +705,142 @@ def get_interview_questions(
     except Exception as e:
         print("❌ 질문 생성 에러:", e)
         raise HTTPException(status_code=500, detail=f"질문 생성 실패: {str(e)}")
+
+
+@router.post("/questions/additional")
+def get_additional_interview_questions(
+    req: AdditionalQuestionRequest,
+    db: Session = Depends(get_db),
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+):
+    """
+    기존 면접 세션에서 선택한 평가축 기준으로 추가 질문을 생성합니다.
+    """
+    selected_axes = [ax for ax in req.selected_axes if ax.get("key") and ax.get("name")]
+    if not selected_axes:
+        raise HTTPException(status_code=400, detail="평가 기준을 1개 이상 선택해주세요.")
+
+    question_count = max(1, min(req.question_count, 10))
+    if question_count < len(selected_axes):
+        raise HTTPException(status_code=400, detail="생성 개수는 선택한 평가 기준 개수 이상이어야 합니다.")
+
+    current_user = get_current_user(db, x_user_id, x_user_email)
+    ctx = _build_db_context(db, current_user, req.company, req.job_role, req.analysis_id, req.resume_id)
+    axes_desc = "\n".join([
+        f"- key: {ax.get('key')}, name: {ax.get('name')}, description: {ax.get('description', '')}, weight: {ax.get('weight', 0)}"
+        for ax in selected_axes
+    ])
+    existing_questions = "\n".join([f"- {q}" for q in (req.existing_questions or []) if q.strip()])
+
+    type_specific_requirement = ""
+    if req.interview_type == "인성":
+        type_condition = (
+            "모든 질문은 인성 면접 카테고리 중 하나로만 생성하세요: "
+            "behavioral(인성/경험), situational(상황 판단), values(가치관), "
+            "growth(성장 가능성), communication(커뮤니케이션)."
+        )
+        type_specific_requirement = """
+5. 기술 지식, 프레임워크, 구현 방법, 코딩/설계 세부 지식을 직접 검증하는 질문은 만들지 마세요.
+6. 아래 인성 면접 대표 질문 흐름을 참고해 지원자의 태도와 사고방식을 확인하는 질문으로 구성하세요:
+   - 자기소개: 커뮤니케이션 능력, 경험 정리 능력, 첫인상 확인
+   - 장점과 단점: 자기 객관화 능력, 단점 개선 노력 확인
+   - 힘들었던 경험과 극복 과정: 문제 해결 방식, 멘탈, 태도 확인
+   - 팀 프로젝트 갈등 경험: 협업 스타일, 갈등 해결 방식 확인
+   - 회사 지원 동기: 지원 동기 진정성, 기업 이해도 확인
+   - 직무 선택 이유: 직무 적합성, 커리어 방향성 확인
+   - 실패 경험: 책임 회피 여부, 회고 능력 확인
+   - 부당한 지시 대응: 조직 적응력, 커뮤니케이션 균형 확인
+   - 동료와 의견 차이: 설득 방식, 협업 태도 확인
+   - 5년 후 모습: 성장 의지, 장기적 방향성 확인
+7. 선택된 평가 기준은 인성 질문의 관찰 관점으로만 사용하고, 기술 정답을 요구하지 마세요.
+"""
+    elif req.interview_type == "실무":
+        type_condition = (
+            "모든 질문은 실무 면접 카테고리 중 하나로만 생성하세요: "
+            "technical(직무/기술), problem_solving(문제 해결), project(프로젝트), "
+            "design(설계/구조화), impact(성과/임팩트)."
+        )
+        type_specific_requirement = "5. 선택된 평가 기준이 직무 역량과 어떻게 연결되는지 구체적으로 검증하세요."
+    else:
+        type_condition = (
+            "질문 목적에 맞게 behavioral, situational, values, growth, communication, "
+            "technical, problem_solving, project, design, impact 중 하나를 선택하세요."
+        )
+        type_specific_requirement = "5. 선택된 평가 기준이 질문에서 분명히 드러나게 작성하세요."
+
+    prompt = f"""
+당신은 기업 면접관입니다. 기존 면접에 이어서 추가 질문을 생성하세요.
+
+[지원 기업] {req.company}
+[지원 직무] {req.job_role}
+
+[채용공고 핵심 요약]
+{ctx['jd']}
+
+[기업/JD 분석 요약]
+{ctx['company_analysis']}
+
+[지원자 자기소개서]
+{ctx['resume']}
+
+[선택된 평가 기준]
+{axes_desc}
+
+[이미 생성된 질문]
+{existing_questions}
+
+조건:
+1. 총 {question_count}개의 질문을 생성하세요.
+2. 선택된 평가 기준을 모두 최소 1번 이상 사용하세요.
+3. 기존 질문과 의미가 중복되지 않게 생성하세요.
+4. {type_condition}
+{type_specific_requirement}
+8. evaluation_axis 필드에는 반드시 선택된 평가 기준의 key 중 하나만 넣으세요.
+9. tips 필드에는 해당 평가 기준에서 면접관이 집중해서 확인할 포인트를 1~2문장으로 작성하세요.
+
+반드시 아래 JSON 배열 형식으로만 출력하세요. 설명, 인사말, 코드블록(```) 절대 출력 금지.
+
+[
+  {{
+    "id": "question-1",
+    "question": "질문 내용",
+    "category": "behavioral | situational | values | growth | communication | technical | problem_solving | project | design | impact",
+    "evaluation_axis": "선택된 평가 기준 key",
+    "tips": "면접관 확인 포인트"
+  }}
+]
+"""
+
+    try:
+        try:
+            raw = _call_claude(prompt, max_tokens=1800, temperature=0.7)
+            print("✅ Claude로 추가 질문 생성 완료")
+        except Exception as claude_err:
+            print(f"⚠️ Claude 실패, GPT로 폴백: {claude_err}")
+            raw = _call_openai(prompt, max_tokens=1800, temperature=0.7)
+
+        parsed = _extract_json(raw)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("questions", [])
+
+        axis_map = {ax.get("key"): ax for ax in selected_axes}
+        for item in parsed:
+            item["id"] = f"q-{uuid.uuid4().hex[:8]}"
+            axis_key = item.get("evaluation_axis", "")
+            axis = axis_map.get(axis_key) or selected_axes[0]
+            item["evaluation_axis"] = axis.get("key")
+            item["axis_name"] = axis.get("name")
+            item["axis_weight"] = axis.get("weight", 0.0)
+
+        return {
+            "questions": parsed[:question_count],
+            "sources": ctx["sources"],
+        }
+
+    except Exception as e:
+        print("❌ 추가 질문 생성 에러:", e)
+        raise HTTPException(status_code=500, detail=f"추가 질문 생성 실패: {str(e)}")
 
 
 @router.post("/follow-up/feedback")
