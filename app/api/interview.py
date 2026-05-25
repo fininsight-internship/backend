@@ -263,6 +263,22 @@ def _compact_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
+def _format_full_context_sections(ctx: dict, sections: Optional[List[str]] = None) -> str:
+    """RAG 컨텍스트를 앞부분만 자르지 않고 섹션 단위로 모두 전달합니다."""
+    labels = {
+        "jd": "채용공고",
+        "company_analysis": "기업/JD 분석",
+        "resume": "자기소개서",
+    }
+    selected_sections = sections or ["jd", "company_analysis", "resume"]
+    parts = []
+    for key in selected_sections:
+        text = (ctx.get(key) or "").strip()
+        if text:
+            parts.append(f"[{labels.get(key, key)}]\n{text}")
+    return "\n\n---\n\n".join(parts)
+
+
 def _serialize_analysis(row: CompanyJDAnalysis) -> dict:
     report = row.analysis_report or {}
     return {
@@ -1086,7 +1102,7 @@ def get_follow_up_question(
     """
     current_user = get_current_user(db, x_user_id, x_user_email)
     ctx = _build_db_context(db, current_user, req.company, req.job_role, req.analysis_id, req.resume_id)
-    resume_ref = req.resume_excerpt or ctx["resume"][:500]
+    resume_ref = req.resume_excerpt or _format_full_context_sections(ctx, ["resume"])
     existing_follow_ups = req.existing_follow_ups or []
     existing_block = "\n".join(f"- {q}" for q in existing_follow_ups[:8]) if existing_follow_ups else "없음"
 
@@ -1208,6 +1224,7 @@ def get_overall_interview_report(
         }
         for ax in (req.axes_used or [])
     ]
+    jd_company_context = _format_full_context_sections(ctx, ["company_analysis", "jd"])
     report_schema = {
         "overall_score": 0,
         "readiness_label": "보완 필요 | 실전 가능 | 합격권",
@@ -1254,8 +1271,7 @@ def get_overall_interview_report(
 [회사/직무] {req.company} · {req.job_role}
 [면접 유형] {req.interview_type}
 [JD/기업 분석 참고]
-{ctx.get("company_analysis", "")[:900]}
-{ctx.get("jd", "")[:900]}
+{jd_company_context}
 [평가 기준]
 {json.dumps(axes_block, ensure_ascii=False)}
 [질문/답변/피드백 데이터]
