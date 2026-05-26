@@ -1,5 +1,5 @@
 import hashlib
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ class SignupRequest(BaseModel):
     email: str
     password: str
     name: Optional[str] = None
+    nickname: Optional[str] = None
     role: Optional[str] = None
 
 def hash_password(password: str) -> str:
@@ -38,6 +39,7 @@ def signup(req: SignupRequest, db: Session = Depends(get_db)):
         email=email_clean,
         password_hash=hashed,
         name=req.name.strip() if req.name else None,
+        eng_name=req.nickname.strip() if req.nickname else None,
         role=req.role.strip() if req.role else None
     )
     
@@ -64,6 +66,31 @@ def signup(req: SignupRequest, db: Session = Depends(get_db)):
             status_code=500,
             detail=f"회원 등록 실패: {str(e)}"
         )
+
+@router.get("/me")
+def get_me(request: Request, db: Session = Depends(get_db)):
+    """현재 로그인된 사용자의 프로필 정보를 반환합니다."""
+    x_user_id = request.headers.get("X-User-Id")
+    if not x_user_id:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    try:
+        user_id = int(x_user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="유효하지 않은 사용자 ID입니다.")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name or "",
+        "role": user.role or "",
+        "eng_name": user.eng_name or "",
+        "birth_date": user.birth_date or "",
+    }
+
 
 class LoginRequest(BaseModel):
     email: str
